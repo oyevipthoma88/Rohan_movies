@@ -1,0 +1,102 @@
+{
+  "name": "Rohan Movies Bot",
+  "description": "Multi-Bot Telegram Movie Transfer Bot with Smart Forward/Copy System",
+  "keywords": ["telegram", "bot", "movies", "transfer", "multi-bot"],
+  "repository": "https://github.com/oyevipthoma88/Rohan_movies",
+  "logo": "https://i.imgur.com/8QJZJ3Z.png",
+  "success_url": "/",
+  "env": {
+    "BOT_TOKEN": {
+      "description": "Main bot token from @BotFather (ye bot sirf commands accept karega, transfer nahi karega)",
+      "required": true
+    },
+    "OWNER_IDS": {
+      "description": "Owner Telegram IDs (comma separated, e.g. 123456789,987654321)",
+      "required": true
+    },
+    "MAIN_DATA": {
+      "description": "MAIN_DATA channel ID where movies will be stored (e.g. -1001234567890)",
+      "required": true
+    },
+    "MOVIE_CHANNELS": {
+      "description": "Source channel IDs (comma separated, e.g. -100111,-100222)",
+      "required": true
+    },
+    "LOG_CHANNEL": {
+      "description": "Log channel ID for notifications (e.g. -100333)",
+      "required": false,
+      "value": ""
+    },
+    "MONGO_URI": {
+      "description": "MongoDB connection string (mongodb+srv://user:pass@cluster.mongodb.net)",
+      "required": true
+    },
+    "MONGO_DB": {
+      "description": "MongoDB database name",
+      "required": true,
+      "value": "rohan_movies"
+    },
+    "TG_API_ID": {
+      "description": "Telegram API ID from my.telegram.org",
+      "required": false,
+      "value": ""
+    },
+    "TG_API_HASH": {
+      "description": "Telegram API Hash from my.telegram.org",
+      "required": false,
+      "value": ""
+    },
+    "TG_SESSION": {
+      "description": "Telethon session string for MTProto",
+      "required": false,
+      "value": ""
+    },
+    "HELPER_BOT_TOKENS": {
+      "description": "🆕 Helper bot tokens (comma separated). Ye bots saari files transfer karenge. Jitne zyada tokens, utni zyada speed!",
+      "required": false,
+      "value": ""
+    },
+    "TRANSFER_CONCURRENCY": {
+      "description": "🆕 Kitne parallel transfers ek saath (5-25 recommended)",
+      "required": false,
+      "value": "15"
+    },
+    "TRANSFER_MODE": {
+      "description": "🆕 Transfer mode: auto (forward->copy fallback), forward (sirf forward), copy (sirf download+upload)",
+      "required": false,
+      "value": "auto"
+    },
+    "SCAN_START_ID": {
+      "description": "Default scan start message ID",
+      "required": false,
+      "value": "100000"
+    },
+    "AUTO_DELETE_MINUTES": {
+      "description": "Movie message auto-delete time (minutes)",
+      "required": false,
+      "value": "7"
+    },
+    "FIRST_DAY_FREE": {
+      "description": "First day free movie limit for new users",
+      "required": false,
+      "value": "3"
+    },
+    "DAILY_FREE": {
+      "description": "Daily free movie limit for free users",
+      "required": false,
+      "value": "1"
+    }
+  },
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "Eco"
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "addons": []
+}
