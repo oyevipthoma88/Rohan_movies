@@ -114,8 +114,8 @@ MONGO_CAPTION_LIMIT = max(0, _int("MONGO_CAPTION_LIMIT", 200))
 # Example: "123:AAA,456:BBB,789:CCC"
 HELPER_BOT_TOKENS = os.getenv("HELPER_BOT_TOKENS", "")
 
-# Concurrent transfers (5-20 recommended depending on bot count)
-TRANSFER_CONCURRENCY = max(1, _int("TRANSFER_CONCURRENCY", 10))
+# Concurrent transfers (higher = faster, Telegram flood limits still apply)
+TRANSFER_CONCURRENCY = max(1, _int("TRANSFER_CONCURRENCY", 30))
 
 # Transfer mode: "auto" (forward->copy), "forward" only, "copy" only
 TRANSFER_MODE = os.getenv("TRANSFER_MODE", "auto").strip().lower()

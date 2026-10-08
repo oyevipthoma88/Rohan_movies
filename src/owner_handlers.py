@@ -1001,15 +1001,34 @@ async def do_scan(message: Message, bot: Bot, state: FSMContext, force_main_data
 
     await db.set("scan_last_start", str(scan_start))
     await db.set("scan_last_end", str(scan_end))
-    if force_main_data:
+    # --- Instant start: validate everything in parallel, send started msg ASAP ---
+    await state.clear()
+    started = time.time()
+
+    if enumerate_history:
         try:
-            main_chat = await bot.get_chat(MAIN_DATA)
-            info = {"id": MAIN_DATA, "title": main_chat.title or "MAIN_DATA", "username": main_chat.username or ""}
+            from config import TG_API_HASH, TG_API_ID, TG_SESSION
+            if not (TG_API_ID and TG_API_HASH and TG_SESSION):
+                return await message.answer(
+                    "❌ `/scanall` ke liye TG_API_ID, TG_API_HASH aur TG_SESSION required hain.\n"
+                    "Heroku config me Telethon StringSession set karo. Explicit range ke liye `/scan start end` use kar sakte ho.",
+                    reply_markup=owner_panel_kb(),
+                )
         except Exception as exc:
             return await message.answer(
-                f"❌ MAIN_DATA channel open nahi hua: <code>{str(exc)[:220]}</code>\n"
-                f"Check karo bot <code>{MAIN_DATA}</code> me admin hai."
+                f"❌ Config error: <code>{str(exc)[:320]}</code>",
+                reply_markup=owner_panel_kb(),
             )
+
+    # Send the "started" message immediately so user sees instant feedback
+    note = await message.answer(
+        f"⚡ <b>Fast scan started</b>\n"
+        "Telethon se newest-first direct read + batch index…"
+    )
+
+    # Parallel validation: check MAIN_DATA + all source channels at once
+    if force_main_data:
+        info = {"id": MAIN_DATA, "title": "MAIN_DATA", "username": ""}
         src = MAIN_DATA
         channel_ids = [MAIN_DATA]
     else:
@@ -1030,54 +1049,45 @@ async def do_scan(message: Message, bot: Bot, state: FSMContext, force_main_data
                 "comma-separated chat IDs bhejo, example: <code>-1001234567890,-1009876543210</code>.",
                 reply_markup=owner_panel_kb(),
             )
+
+    # Validate all channels in parallel (MAIN_DATA + all source channels)
+    async def _check_chat(cid):
+        try:
+            return await bot.get_chat(cid)
+        except Exception:
+            return None
     dump = MAIN_DATA
-    try:
-        await bot.get_chat(dump)
-    except Exception as exc:
+    all_chats = await asyncio.gather(_check_chat(dump), *[_check_chat(cid) for cid in channel_ids])
+    main_chat = all_chats[0]
+    if main_chat is None:
         return await message.answer(
-            f"❌ MAIN_DATA channel open nahi hua: <code>{str(exc)[:240]}</code>\n"
-            "Bot ko MAIN_DATA me administrator banao aur ID check karo.",
+            f"❌ MAIN_DATA channel open nahi hua. Bot ko MAIN_DATA me administrator banao.",
             reply_markup=owner_panel_kb(),
         )
-    checked_channels = []
-    for channel_id in channel_ids:
-        try:
-            chat = await bot.get_chat(channel_id)
-            checked_channels.append(chat.title or str(channel_id))
-        except Exception as exc:
+    for idx, chat in enumerate(all_chats[1:], 0):
+        if chat is None:
             return await message.answer(
-                f"❌ Source channel <code>{channel_id}</code> open nahi hua: <code>{str(exc)[:240]}</code>\n"
+                f"❌ Source channel <code>{channel_ids[idx]}</code> open nahi hua.\n"
                 "Chat ID sahi hai aur bot source channel me member/admin hai, ye check karo.",
                 reply_markup=owner_panel_kb(),
             )
-    if enumerate_history:
-        try:
-            from config import TG_API_HASH, TG_API_ID, TG_SESSION
-            if not (TG_API_ID and TG_API_HASH and TG_SESSION):
-                return await message.answer(
-                    "❌ `/scanall` ke liye TG_API_ID, TG_API_HASH aur TG_SESSION required hain.\n"
-                    "Heroku config me Telethon StringSession set karo. Explicit range ke liye `/scan start end` use kar sakte ho.",
-                    reply_markup=owner_panel_kb(),
-                )
-        except Exception as exc:
-            return await message.answer(
-                f"❌ Config error: <code>{str(exc)[:320]}</code>",
-                reply_markup=owner_panel_kb(),
-            )
-    await state.clear()
-    started = time.time()
+
     resume_info = ""
     if enumerate_history:
         first_ch = channel_ids[0] if channel_ids else 0
         cursor_val = await db.get(f"scanall_cursor:{first_ch}", "0")
         if cursor_val and cursor_val.isdigit() and int(cursor_val) > 0:
             resume_info = f"\n🔄 Resuming from message #{cursor_val}"
-    note = await message.answer(
-        f"⚡ <b>Fast scan started</b>\n"
-        f"Channel(s): <b>{len(channel_ids)}</b>\n"
-        "Telethon se newest-first direct read + batch index…"
-        + resume_info
-    )
+    if resume_info:
+        try:
+            await note.edit_text(
+                f"⚡ <b>Fast scan started</b>\n"
+                f"Channel(s): <b>{len(channel_ids)}</b>\n"
+                "Telethon se newest-first direct read + batch index…"
+                + resume_info
+            )
+        except Exception:
+            pass
 
     async def progress(done: int, total: int, st):
         try:

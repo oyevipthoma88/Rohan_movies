@@ -152,7 +152,6 @@ class TransferManager:
                         done += 1
                     if progress and done % 10 == 0:
                         await progress(done, total, self.stats)
-                    await asyncio.sleep(0.02)
 
         await asyncio.gather(*[asyncio.create_task(_do(m)) for m in msg_ids], return_exceptions=True)
         return success, failed, skipped
