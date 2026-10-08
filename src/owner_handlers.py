@@ -512,7 +512,28 @@ async def do_broadcast(message: Message, bot: Bot, state: FSMContext):
     )
     await log_owner_action(bot, message.from_user.id, "broadcast_start",
                            f"To {len(users)} users, {len(forward_ids)} msgs")
-    limiter = asyncio.Semaphore(12)
+
+    # Test one forward first to detect protected content. If the source channel
+    # has "Restrict saving content" ON, forward_message will fail — we switch to
+    # copy_message so the broadcast still goes out to every user.
+    use_copy = False
+    try:
+        test_fwd = await bot.forward_message(
+            chat_id=message.from_user.id,
+            from_chat_id=message.chat.id,
+            message_id=forward_ids[0],
+        )
+        try:
+            await bot.delete_message(message.from_user.id, test_fwd.message_id)
+        except Exception:
+            pass
+    except Exception as exc:
+        low = str(exc).lower()
+        if "forward" in low and ("restrict" in low or "protected" in low or "can't" in low):
+            use_copy = True
+            logging.info("Broadcast: source is forward-restricted, using copy_message")
+
+    limiter = asyncio.Semaphore(15)
 
     permanent_errors = 0
     protected_errors = 0
@@ -525,16 +546,32 @@ async def do_broadcast(message: Message, bot: Bot, state: FSMContext):
                 success = True
                 for mid in forward_ids:
                     try:
-                        await bot.forward_message(
-                            chat_id=uid,
-                            from_chat_id=message.chat.id,
-                            message_id=mid,
-                        )
+                        if use_copy:
+                            await bot.copy_message(
+                                chat_id=uid,
+                                from_chat_id=message.chat.id,
+                                message_id=mid,
+                            )
+                        else:
+                            await bot.forward_message(
+                                chat_id=uid,
+                                from_chat_id=message.chat.id,
+                                message_id=mid,
+                            )
                     except Exception as exc:
                         low = str(exc).lower()
-                        if "can't be forwarded" in low or "chat_forwards_restricted" in low or "forward" in low and "restrict" in low:
-                            protected_errors += 1
-                            return False
+                        if "can't be forwarded" in low or "chat_forwards_restricted" in low or ("forward" in low and "restrict" in low):
+                            # Try copy as fallback for this specific user
+                            try:
+                                await bot.copy_message(
+                                    chat_id=uid,
+                                    from_chat_id=message.chat.id,
+                                    message_id=mid,
+                                )
+                                continue
+                            except Exception:
+                                protected_errors += 1
+                                return False
                         if "forbidden" in low or "blocked" in low or "user is deactivated" in low:
                             permanent_errors += 1
                             return False
@@ -543,7 +580,6 @@ async def do_broadcast(message: Message, bot: Bot, state: FSMContext):
                         break
                 if success:
                     return True
-                # Transient error on attempt 0: retry once
                 if attempt == 0 and last_exc is not None:
                     low = str(last_exc).lower()
                     if "retry after" in low:
@@ -558,7 +594,8 @@ async def do_broadcast(message: Message, bot: Bot, state: FSMContext):
     results = await asyncio.gather(*(deliver(uid) for uid in users))
     sent = sum(results)
     failed = len(results) - sent
-    summary = f"✅ Forward broadcast done.\nForwarded: {sent}\nFailed: {failed}"
+    method_label = "Copy" if use_copy else "Forward"
+    summary = f"✅ {method_label} broadcast done.\nDelivered: {sent}/{len(users)}\nFailed: {failed}"
     if protected_errors:
         summary += f"\n🔒 {protected_errors} user(s) ko forward nahi hua — source content protected hai."
     await note.edit_text(summary)
@@ -766,13 +803,21 @@ async def diag(message: Message, bot: Bot):
     ch = await get_movie_channel()
     lines = [f"🎞 Movie channel: <code>{ch or 'NOT SET'}</code>",
              f"🗂 Log channel: <code>{LOG_CHANNEL or 'not set'}</code>",
-             f"🎬 Indexed movies in storage: <b>{await db.movie_count(storage_only=True)}</b>"]
+             f"🎬 Indexed movies in storage: <b>{await db.movie_count(storage_only=True)}</b>",
+             f"👥 Registered users: <b>{await db.user_count()}</b>"]
     if ch:
         try:
             me = await bot.get_chat_member(ch, (await bot.me()).id)
             lines.append(f"🤖 Bot status in channel: <b>{me.status}</b>")
         except Exception as e:
             lines.append(f"⚠️ Channel access error: <code>{e}</code>")
+    try:
+        main_chat = await bot.get_chat(MAIN_DATA)
+        lines.append(f"📦 MAIN_DATA: <b>{main_chat.title or 'OK'}</b> <code>{MAIN_DATA}</code>")
+        me_main = await bot.get_chat_member(MAIN_DATA, (await bot.me()).id)
+        lines.append(f"🤖 Bot status in MAIN_DATA: <b>{me_main.status}</b>")
+    except Exception as e:
+        lines.append(f"⚠️ MAIN_DATA access error: <code>{e}</code>")
     if LOG_CHANNEL:
         try:
             m = await bot.send_message(LOG_CHANNEL, "diag ✅")
@@ -780,6 +825,16 @@ async def diag(message: Message, bot: Bot):
             lines.append("📨 Log channel write: OK")
         except Exception as e:
             lines.append(f"⚠️ Log channel error: <code>{e}</code>")
+    try:
+        from config import TG_API_ID, TG_API_HASH, TG_SESSION
+        if TG_API_ID and TG_API_HASH and TG_SESSION:
+            lines.append(f"🔑 Telethon: configured (API_ID={TG_API_ID})")
+        else:
+            lines.append("⚠️ Telethon: NOT configured — /scanall and /scanmain need TG_API_ID, TG_API_HASH, TG_SESSION")
+    except Exception as e:
+        lines.append(f"⚠️ Telethon config check: <code>{e}</code>")
+    pool = helper_pool.get_stats()
+    lines.append(f"🤖 Helper bots: {pool['active']}/{pool['total']} active")
     await message.answer("\n".join(lines), reply_markup=owner_panel_kb())
 
 

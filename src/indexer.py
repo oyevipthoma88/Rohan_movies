@@ -330,7 +330,16 @@ async def _probe(bot: Bot, dump: int, src, mid: int, stats: ScanStats, dedup=Non
     probe_channel = LOG_CHANNEL if same_channel and LOG_CHANNEL and LOG_CHANNEL != dump else dump
     for attempt in range(5):
         try:
-            fwd = await bot.forward_message(probe_channel, src, mid, disable_notification=True)
+            fwd = await asyncio.wait_for(
+                bot.forward_message(probe_channel, src, mid, disable_notification=True),
+                timeout=15,
+            )
+        except asyncio.TimeoutError:
+            stats.errors += 1
+            stats.last_error = f"forward timeout for msg {mid}"
+            if len(stats.samples) < 3:
+                stats.samples.append(f"msg {mid}: forward timeout")
+            return
         except Exception as e:
             txt = str(e)
             kind = classify(txt)
@@ -357,11 +366,14 @@ async def _probe(bot: Bot, dump: int, src, mid: int, stats: ScanStats, dedup=Non
 
         keep_copy = not same_channel
         try:
-            if (fwd.caption or "").strip() == SNAPSHOT_MARKER:
+            # aiogram's forward_message returns a Message, but copy_message
+            # returns a MessageId object that has no .caption/.video etc.
+            # Guard against both so the scan never crashes on attribute access.
+            caption = getattr(fwd, "caption", None) or getattr(fwd, "text", "") or ""
+            if (caption or "").strip() == SNAPSHOT_MARKER:
                 stats.skipped += 1
                 return
-            media = fwd.video or fwd.document or fwd.audio
-            caption = fwd.caption or fwd.text or ""
+            media = getattr(fwd, "video", None) or getattr(fwd, "document", None) or getattr(fwd, "audio", None)
             if not media:
                 stats.skipped += 1
                 return
@@ -387,11 +399,9 @@ async def _probe(bot: Bot, dump: int, src, mid: int, stats: ScanStats, dedup=Non
                         pass
                 return
             meta = build_meta(media, caption)
-            # When scanning MAIN_DATA itself, fwd.message_id is only a temporary
-            # parsing copy. Store the original channel post ID so delivery uses
-            # bot.copy_message(..., MAIN_DATA, original_id) directly.
-            index_id = mid if same_channel else fwd.message_id
-            storage_id = mid if same_channel else fwd.message_id
+            fwd_msg_id = getattr(fwd, "message_id", 0)
+            index_id = mid if same_channel else fwd_msg_id
+            storage_id = mid if same_channel else fwd_msg_id
             inserted = await db.upsert_movie(index_id, meta["title"], meta["year"], meta["quality"],
                                              meta["language"], meta["size"], caption,
                                              media.file_id, media_kind(fwd), detect_content_type(caption),
@@ -405,7 +415,7 @@ async def _probe(bot: Bot, dump: int, src, mid: int, stats: ScanStats, dedup=Non
         finally:
             if not keep_copy:
                 try:
-                    await bot.delete_message(probe_channel, fwd.message_id)
+                    await bot.delete_message(probe_channel, getattr(fwd, "message_id", 0))
                 except Exception:
                     pass
 
@@ -557,7 +567,7 @@ async def scan_channel_fast(bot: Bot, src, dump: int, progress=None,
         for retry in range(3):
             try:
                 async for message in client.iter_messages(
-                    entity, limit=None, wait_time=0, batch_size=1000,
+                    entity, limit=None, wait_time=2, batch_size=1000,
                     max_id=cursor_max or None,
                 ):
                     last_id = int(getattr(message, "id", 0) or 0)
@@ -622,13 +632,22 @@ async def scan_channel_fast(bot: Bot, src, dump: int, progress=None,
         last_flood_time = 0.0
 
         async def copy_and_index(info: dict) -> None:
-            nonlocal current_concurrency, copy_sem, flood_count, last_flood_time
+            nonlocal flood_count, last_flood_time
             src_mid = info["id"]
+            fwd = None
             for attempt in range(5):
                 async with copy_sem:
                     try:
-                        fwd = await bot.copy_message(dump, src, src_mid, disable_notification=True)
+                        fwd = await asyncio.wait_for(
+                            bot.copy_message(dump, src, src_mid, disable_notification=True),
+                            timeout=15,
+                        )
                         break
+                    except asyncio.TimeoutError:
+                        async with lock:
+                            stats.errors += 1
+                            stats.last_error = f"copy timeout for msg {src_mid}"
+                        return
                     except Exception as exc:
                         txt = str(exc)
                         kind = classify(txt)
@@ -638,10 +657,6 @@ async def scan_channel_fast(bot: Bot, src, dump: int, progress=None,
                             async with lock:
                                 flood_count += 1
                                 last_flood_time = time.monotonic()
-                                if flood_count % 3 == 0 and current_concurrency > min_concurrency:
-                                    current_concurrency = max(min_concurrency, current_concurrency // 2)
-                                    copy_sem = asyncio.Semaphore(current_concurrency)
-                                    logging.warning("Scan flood control: reduced concurrency to %d", current_concurrency)
                             await asyncio.sleep(wait)
                             continue
                         elif kind == "protected":
@@ -666,25 +681,28 @@ async def scan_channel_fast(bot: Bot, src, dump: int, progress=None,
                     stats.last_error = "max retries exceeded"
                 return
 
+            if fwd is None:
+                return
+            fwd_msg_id = getattr(fwd, "message_id", 0)
             m = info["meta"]
             inserted = await db.upsert_movie(
-                fwd.message_id, m["title"], m["year"], m["quality"],
+                fwd_msg_id, m["title"], m["year"], m["quality"],
                 m["language"], m["size"], info["caption"],
                 info["file_key"], info["file_type"], detect_content_type(info["caption"]),
-                duration=m["duration"], storage_msg_id=fwd.message_id, commit=False,
+                duration=m["duration"], storage_msg_id=fwd_msg_id, commit=False,
             )
             async with lock:
                 if inserted:
                     stats.found += 1
                 else:
                     stats.skipped += 1
-                    try:
-                        await bot.delete_message(dump, fwd.message_id)
-                    except Exception:
-                        pass
-                if time.monotonic() - last_flood_time > 30 and current_concurrency < 64:
-                    current_concurrency = min(64, current_concurrency + 4)
-                    copy_sem = asyncio.Semaphore(current_concurrency)
+                    if fwd_msg_id:
+                        try:
+                            await asyncio.wait_for(
+                                bot.delete_message(dump, fwd_msg_id), timeout=5
+                            )
+                        except Exception:
+                            pass
 
         # Stream batches: read 500 messages, copy them, flush, repeat.
         # This avoids loading the entire channel into memory before starting.
@@ -692,7 +710,7 @@ async def scan_channel_fast(bot: Bot, src, dump: int, progress=None,
         for retry in range(3):
             try:
                 async for message in client.iter_messages(
-                    entity, limit=None, wait_time=0, batch_size=1000,
+                    entity, limit=None, wait_time=2, batch_size=1000,
                     max_id=cursor_max or None,
                 ):
                     last_id = int(getattr(message, "id", 0) or 0)
@@ -710,12 +728,11 @@ async def scan_channel_fast(bot: Bot, src, dump: int, progress=None,
                         if info["caption_key"]:
                             dedup_captions.add(info["caption_key"])
 
-                    # Process in batches of 500 to avoid memory blow-up.
-                    if len(batch_infos) >= 500:
+                    if len(batch_infos) >= 300:
                         if stats.stop_reason:
                             break
-                        batch_slice = batch_infos[:500]
-                        batch_infos = batch_infos[500:]
+                        batch_slice = batch_infos[:300]
+                        batch_infos = batch_infos[300:]
                         await asyncio.gather(*(copy_and_index(item) for item in batch_slice))
                         await db.commit()
                         await flush_and_save(last_id)
@@ -805,7 +822,13 @@ async def scan_range(bot: Bot, src, dump: int, start_id: int, end_id: int,
         ids = [start_id + step * i for i in range(offset, min(offset + batch, total))]
         tasks = [asyncio.create_task(worker(mid)) for mid in ids]
         try:
-            await asyncio.gather(*tasks)
+            await asyncio.wait_for(asyncio.gather(*tasks), timeout=120)
+        except asyncio.TimeoutError:
+            logging.warning("Scan batch timeout at offset %d, cancelling tasks", offset)
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         except asyncio.CancelledError:
             stop.set()
             for task in tasks:

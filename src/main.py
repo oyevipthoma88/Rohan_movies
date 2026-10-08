@@ -349,7 +349,7 @@ async def _scan_single_channel(client, channel_id: int) -> int:
         batch = []
         t0 = time.time()
         max_id_seen = min_id
-        async for msg in client.iter_messages(channel_id, min_id=min_id, limit=None, batch_size=1000):
+        async for msg in client.iter_messages(channel_id, min_id=min_id, limit=None, batch_size=1000, wait_time=2):
             try:
                 if not msg.media:
                     continue
