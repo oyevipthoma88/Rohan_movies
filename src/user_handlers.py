@@ -6,6 +6,7 @@ import asyncio
 import time
 import os
 import tempfile
+import datetime as _dt
 from html import escape
 
 from aiogram import Bot, F, Router
@@ -13,10 +14,11 @@ from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, ChatJoinRequest, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (CallbackQuery, ChatJoinRequest, InlineKeyboardButton,
+                           InlineKeyboardMarkup, Message)
 
 from config import (
-    DEFAULT_CAPTION_JOIN, DEFAULT_CAPTION_VISIT, LOG_CHANNEL,
+    DEFAULT_CAPTION_JOIN, DEFAULT_CAPTION_VISIT, DAILY_FREE, FIRST_DAY_FREE, LOG_CHANNEL,
     ONLINE_PLAYER_BOT, OWNER_IDS, REFERRAL_REWARDS, STORAGE_CHANNEL, SUPPORT_URL,
 )
 from log_helper import (
@@ -61,9 +63,45 @@ async def is_owner(user_id: int) -> bool:
     return user_id in OWNER_IDS
 
 
+_STORAGE_CHAT_CACHE: dict = {}
+_STORAGE_CHAT_CACHE_TS = 0.0
+
+
+async def _get_storage_chat(bot: Bot) -> dict:
+    """Cached STORAGE_CHANNEL info — avoids a get_chat API call on every delivery."""
+    global _STORAGE_CHAT_CACHE_TS
+    now = time.time()
+    if _STORAGE_CHAT_CACHE and now - _STORAGE_CHAT_CACHE_TS < 300:
+        return _STORAGE_CHAT_CACHE
+    chat = await bot.get_chat(STORAGE_CHANNEL)
+    _STORAGE_CHAT_CACHE.clear()
+    _STORAGE_CHAT_CACHE["id"] = chat.id
+    _STORAGE_CHAT_CACHE["username"] = chat.username or ""
+    _STORAGE_CHAT_CACHE_TS = now
+    return _STORAGE_CHAT_CACHE
+
+
+_BOT_ME_CACHE: dict = {}
+_BOT_ME_CACHE_TS = 0.0
+
+
+async def _get_bot_me(bot: Bot) -> dict:
+    """Cached bot.get_me() — avoids repeated API calls."""
+    global _BOT_ME_CACHE_TS
+    now = time.time()
+    if _BOT_ME_CACHE and now - _BOT_ME_CACHE_TS < 300:
+        return _BOT_ME_CACHE
+    me = await bot.me()
+    _BOT_ME_CACHE.clear()
+    _BOT_ME_CACHE["id"] = me.id
+    _BOT_ME_CACHE["username"] = me.username or ""
+    _BOT_ME_CACHE["first_name"] = me.first_name or ""
+    _BOT_ME_CACHE_TS = now
+    return _BOT_ME_CACHE
+
+
 async def force_channels() -> list[str]:
     raw = await db.get("force_channels", "")
-    # Keep the runtime invariant even if an older database contains more entries.
     return [c.strip() for c in raw.split(",") if c.strip()][:5]
 
 
@@ -92,11 +130,6 @@ async def not_joined(bot: Bot, user_id: int) -> list[tuple[str, str]]:
 
 @router.chat_join_request()
 async def handle_join_request(join_request: ChatJoinRequest, bot: Bot):
-    """Auto-approve join requests for private GROUPS only (not channels).
-
-    Private groups set as must-join (force_channels) me join request aate hi
-    auto-approve. Private channels ke join requests skip hote hain.
-    """
     chat = join_request.chat
     user = join_request.from_user
 
@@ -144,16 +177,15 @@ async def format_movie_caption(bot: Bot, movie) -> str:
     quality = escape(str(movie["quality"] or "Unknown"))
     duration = escape(str(movie["duration"] or "Unknown"))
     try:
-        storage = await bot.get_chat(STORAGE_CHANNEL)
-        join = await db.get("caption_join", "") or DEFAULT_CAPTION_JOIN or (f"@{storage.username}" if storage.username else str(STORAGE_CHANNEL))
+        storage = await _get_storage_chat(bot)
+        join = await db.get("caption_join", "") or DEFAULT_CAPTION_JOIN or (f"@{storage['username']}" if storage["username"] else str(STORAGE_CHANNEL))
     except Exception:
         join = await db.get("caption_join", "") or DEFAULT_CAPTION_JOIN or str(STORAGE_CHANNEL)
     try:
-        me = await bot.me()
-        username = await db.get("caption_visit", "") or DEFAULT_CAPTION_VISIT or (f"@{me.username}" if me.username else "")
+        me = await _get_bot_me(bot)
+        username = await db.get("caption_visit", "") or DEFAULT_CAPTION_VISIT or (f"@{me['username']}" if me["username"] else "")
     except Exception:
         username = await db.get("caption_visit", "") or DEFAULT_CAPTION_VISIT
-    # Owner-set custom template takes priority over the hardcoded default.
     template = await db.get("caption_template", "") or DEFAULT_CAPTION_TEMPLATE
     extra = ""
     values = {
@@ -164,13 +196,9 @@ async def format_movie_caption(bot: Bot, movie) -> str:
         "{username}": escape(username or "-"),
         "{extra}": escape(extra),
     }
-    # Literal token replacement is safer than str.format: unknown braces in a
-    # custom caption never crash delivery and supported tokens are deterministic.
     caption = template
     for token, replacement in values.items():
         caption = caption.replace(token, replacement)
-    # Delivery captions are intentionally strict: never append the source
-    # channel's original caption or extra metadata outside the approved format.
     try:
         auto_delete_minutes = int(await db.get("auto_delete_minutes", "0") or 0)
     except (TypeError, ValueError):
@@ -193,8 +221,8 @@ async def send_home(target: Optional[Message], bot: Bot, user_id: int) -> None:
         first_day = not bool(user["first_bonus_used"])
         status = "🆓 Free plan • Day 1: up to 3 movies" if first_day else "🆓 Free plan • 1 movie per day"
     try:
-        bot_profile = await bot.me()
-        bot_name = escape(bot_profile.first_name or bot_profile.username or "this bot")
+        bot_profile = await _get_bot_me(bot)
+        bot_name = escape(bot_profile["first_name"] or bot_profile["username"] or "this bot")
     except Exception:
         bot_name = "this bot"
     suggestions = await db.popular_movies("movie", 3)
@@ -231,7 +259,6 @@ async def send_home(target: Optional[Message], bot: Bot, user_id: int) -> None:
         except Exception:
             pass
             
-    # Fallback to sending a new message if target is None or editing failed (e.g., message deleted)
     if pic:
         try:
             await bot.send_photo(user_id, photo=pic, caption=text, reply_markup=kb)
@@ -448,7 +475,7 @@ async def voice_search(message: Message, bot: Bot, state: FSMContext):
             return
         await log_voice_search(bot, message.from_user, text)
         await note.edit_text(f"🔎 Suna: <b>{escape(text)}</b>")
-        await do_search(message, text, state)
+        await do_search(message, text, state, bot)
     except Exception:
         logging.exception("Voice search failed for %s", message.from_user.id)
         await log_voice_search(bot, message.from_user, failed=True)
@@ -461,15 +488,15 @@ async def voice_search(message: Message, bot: Bot, state: FSMContext):
 
 
 @router.message(Flow.searching, F.text)
-async def text_search(message: Message, state: FSMContext):
-    await do_search(message, message.text.strip(), state)
+async def text_search(message: Message, bot: Bot, state: FSMContext):
+    await do_search(message, message.text.strip(), state, bot)
 
 
 @router.message(F.chat.type == ChatType.PRIVATE, F.text, ~F.text.startswith("/"))
-async def direct_dm_search(message: Message, state: FSMContext):
+async def direct_dm_search(message: Message, bot: Bot, state: FSMContext):
     """Search any plain DM text without requiring the Movies button first."""
     await state.update_data(content_type="movie")
-    await do_search(message, message.text.strip(), state)
+    await do_search(message, message.text.strip(), state, bot)
 
 
 @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.text, ~F.text.startswith("/"))
@@ -481,13 +508,13 @@ async def direct_group_search(message: Message, bot: Bot, state: FSMContext):
     group_mode = await db.get("group_mode", "1")
     if group_mode != "1":
         return
-    me = await bot.me()
-    username = f"@{me.username.lower()}" if me.username else ""
+    me = await _get_bot_me(bot)
+    username = f"@{me['username'].lower()}" if me["username"] else ""
     is_mentioned = username and username in (message.text or "").lower()
     is_reply_to_bot = (
         message.reply_to_message
         and message.reply_to_message.from_user
-        and message.reply_to_message.from_user.id == me.id
+        and message.reply_to_message.from_user.id == me["id"]
     )
     if not is_mentioned and not is_reply_to_bot:
         return
@@ -496,13 +523,16 @@ async def direct_group_search(message: Message, bot: Bot, state: FSMContext):
         return
     await state.update_data(content_type="movie")
     await log_group_search(bot, message.from_user, message.chat.id, query, 0)
-    await do_search(message, query, state)
+    await do_search(message, query, state, bot)
 
 
 
 
-async def do_search(message: Message, query: str, state: FSMContext):
-    pending = await not_joined(message.bot, message.from_user.id)
+async def do_search(message: Message, query: str, state: FSMContext, bot: Bot | None = None):
+    effective_bot = bot or message.bot
+    if effective_bot is None:
+        return
+    pending = await not_joined(effective_bot, message.from_user.id)
     if pending:
         await message.answer(
             "🔒 Required channel leave ho gaya hai. Movie search/delivery ke liye pehle join karo aur Verify dabao.",
@@ -519,14 +549,13 @@ async def do_search(message: Message, query: str, state: FSMContext):
     ok, why = await check_quota(message.from_user.id)
     if not ok:
         await state.clear()
-        await log_quota_exhausted(bot=message.bot, user=message.from_user, limit=1)
+        await log_quota_exhausted(bot=effective_bot, user=message.from_user, limit=1)
         await message.answer(why, reply_markup=plans_kb(await db.plans()))
         return
     data = await state.get_data()
     content_type = data.get("content_type", "")
     results = await search_movies(query, content_type=content_type)
 
-    # ── DIRECT CHANNEL FALLBACK: channel se instant results ──
     if not results:
         try:
             direct_results = await search_channel(query, limit=50)
@@ -542,7 +571,6 @@ async def do_search(message: Message, query: str, state: FSMContext):
                 if _k and _k not in _seen:
                     _seen.add(_k)
                     _rows.append(_d)
-            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
             _btns = []
             for _r in _rows[:10]:
                 title = (_r.get('title') or 'Movie')[:60]
@@ -551,7 +579,6 @@ async def do_search(message: Message, query: str, state: FSMContext):
                     text=f"🎬 {title}",
                     callback_data=f"directdl:{_ch_id}:{_r.get('msg_id')}"
                 )])
-            # Support button when available
             _support_url = await db.get("support_url", "") or SUPPORT_URL
             if _support_url:
                 _btns.append([InlineKeyboardButton(text="📞 Support / Request Movie", url=_support_url)])
@@ -562,8 +589,6 @@ async def do_search(message: Message, query: str, state: FSMContext):
             )
             return
 
-        if not results:
-            pass  # Show suggestions when no results
         suggestions = await db.recent_movies(content_type=content_type, limit=5, storage_only=True)
         suggestion_text = ""
         suggestion_markup = None
@@ -571,17 +596,13 @@ async def do_search(message: Message, query: str, state: FSMContext):
             names = ", ".join(str(row["title"] or "Movie") for row in suggestions[:5])
             suggestion_text = f"\n\n✅ Ye movies abhi available hain: <b>{escape(names)}</b>\nInme se kisi button ko tap karke movie le sakte ho:"
             suggestion_markup = results_kb(suggestions, query)
-        # Get support URL from settings or env
         support_url = await db.get("support_url", "") or SUPPORT_URL
         
-        # Try spelling correction using SQL-filtered candidates (not all titles)
         candidate_titles = await db.search_titles_for_spelling(query)
         corrected = correct_spelling(query, candidate_titles)
         spelling_msg = ""
         if corrected and corrected.lower() != query.lower():
             spelling_msg = f"\n\n💡 Kya aap <b>{escape(corrected)}</b> dhundh rahe the? Spelling check karke dobara try karo!"
-        # Build reply markup with support button if URL is set
-        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
         kb_rows = []
         if suggestion_markup:
             kb_rows.extend(suggestion_markup.inline_keyboard)
@@ -597,11 +618,11 @@ async def do_search(message: Message, query: str, state: FSMContext):
             + suggestion_text,
             reply_markup=final_markup,
         )
-        await log_not_found(message.bot, message.from_user, query, content_type, corrected or "")
+        await log_not_found(effective_bot, message.from_user, query, content_type, corrected or "")
         return
     await state.update_data(last_query=query, content_type=content_type)
     top = f"{results[0]['title']} (msg {results[0]['msg_id']})" if results else ""
-    await log_search(message.bot, message.from_user, query, len(results), content_type, top)
+    await log_search(effective_bot, message.from_user, query, len(results), content_type, top)
     await message.answer(
         f"🔎 <b>{escape(query)}</b> — {len(results)} result(s) mile!\n"
         "👇 Quality dekh kar movie select karo:",
@@ -610,9 +631,12 @@ async def do_search(message: Message, query: str, state: FSMContext):
 
 
 async def _send_movie_impl(cb: CallbackQuery, bot: Bot, state: FSMContext):
-    # Acknowledge immediately so Telegram does not keep the button spinner active.
     await cb.answer("File bhej raha hoon…")
-    msg_id = int(cb.data.split(":")[1])
+    try:
+        msg_id = int(cb.data.split(":")[1])
+    except (IndexError, ValueError):
+        await cb.message.answer("⚠️ Invalid movie link. Dobara search karo.")
+        return
     pending = await not_joined(bot, cb.from_user.id)
     if pending:
         await cb.message.answer(
@@ -634,8 +658,8 @@ async def _send_movie_impl(cb: CallbackQuery, bot: Bot, state: FSMContext):
         await cb.message.answer("⚠️ Is movie ka MAIN_DATA post ID missing hai. Owner ko /scanall dobara chalana hoga.")
         return
     try:
-        storage_chat = await bot.get_chat(STORAGE_CHANNEL)
-        storage_info = {"id": storage_chat.id, "username": storage_chat.username or ""}
+        storage_chat = await _get_storage_chat(bot)
+        storage_info = {"id": storage_chat["id"], "username": storage_chat["username"]}
     except Exception:
         storage_info = {"id": STORAGE_CHANNEL, "username": ""}
     link = post_link(storage_info, delivery_msg_id)
@@ -662,8 +686,6 @@ async def _send_movie_impl(cb: CallbackQuery, bot: Bot, state: FSMContext):
 
     mode, err = "", ""
     delivered_message_id = 0
-    # 1) Primary delivery: original post ko exact MAIN_DATA se direct copy karo.
-    # Isse re-upload nahi hota aur MAIN_DATA single source of truth rehta hai.
     try:
         copied = await asyncio.wait_for(
             bot.copy_message(
@@ -695,8 +717,6 @@ async def _send_movie_impl(cb: CallbackQuery, bot: Bot, state: FSMContext):
     except Exception as e:
         err = str(e)
 
-    # 2) Fallback: deliver through the configured user session. The importer
-    # stores tg:<document-id>:<hash> only as a DB dedupe key, not as a Bot API file_id.
     file_id = movie["file_id"] if movie and "file_id" in movie.keys() else ""
     if not mode and file_id.startswith("tg:"):
         try:
@@ -711,7 +731,6 @@ async def _send_movie_impl(cb: CallbackQuery, bot: Bot, state: FSMContext):
         except Exception as e:
             err = str(e)
 
-    # 3) Fallback: real Bot API file_id from older indexed posts.
     file_type = (movie["file_type"] if movie and "file_type" in movie.keys() else "") or "document"
     if not mode and file_id and not file_id.startswith("tg:"):
         senders = {"video": bot.send_video, "audio": bot.send_audio, "document": bot.send_document}
@@ -725,7 +744,6 @@ async def _send_movie_impl(cb: CallbackQuery, bot: Bot, state: FSMContext):
         except Exception as e:
             err = str(e)
 
-    # 4) Last resort: channel post ka direct button
     if not mode and link:
         mode = "link-fallback"
         fallback_message = await cb.message.answer(
@@ -737,7 +755,6 @@ async def _send_movie_impl(cb: CallbackQuery, bot: Bot, state: FSMContext):
         await refund_quota(cb.from_user.id)
         kind = classify(err)
         mode = f"failed({kind})"
-        # The callback was already acknowledged; send the actionable error in chat.
         await cb.message.answer(
             "⚠️ Movie deliver nahi ho payi.\n"
             f"MAIN_DATA post: <code>{delivery_msg_id}</code>\n"
@@ -769,7 +786,6 @@ async def _send_movie_impl(cb: CallbackQuery, bot: Bot, state: FSMContext):
     if not mode.startswith("failed"):
         await db.add_history(cb.from_user.id, query, title, msg_id)
         await db.add_audit(cb.from_user.id, "delivery", f"{title} | mode={mode} | msg={msg_id}")
-        # Callback was acknowledged at the beginning; no second answer is needed.
 
     await log_delivery(bot, cb.from_user, query, str(title), msg_id, mode, err)
 
@@ -879,7 +895,10 @@ async def send_movie(cb: CallbackQuery, bot: Bot, state: FSMContext):
 async def tutorial(cb: CallbackQuery, bot: Bot):
     await cb.answer()
     await log_callback(bot, cb.from_user, "tutorial", "Viewed tutorial")
-    await cb.message.answer("📘 <b>Tutorial</b>\n\n" + await db.get("tutorial"))
+    await cb.message.answer(
+        "📘 <b>Tutorial</b>\n\n" + await db.get("tutorial"),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button("🏠 Home", callback_data="home")]]),
+    )
 
 
 @router.callback_query(F.data == "owner_info")
@@ -919,12 +938,15 @@ async def history(cb: CallbackQuery, bot: Bot):
         f"{i}. {r['title'] or r['query']} — {time.strftime('%d %b %H:%M', time.localtime(r['at']))}"
         for i, r in enumerate(rows, 1)
     ]
-    await cb.message.answer("🕘 <b>Last History</b>\n\n" + "\n".join(lines))
+    await cb.message.answer(
+        "🕘 <b>Last History</b>\n\n" + "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button("🏠 Home", callback_data="home")]]),
+    )
 
 
 @router.callback_query(F.data == "refer")
 async def refer(cb: CallbackQuery, bot: Bot):
-    me = await bot.get_me()
+    me = await _get_bot_me(bot)
     user = await db.user(cb.from_user.id)
     rules = "\n".join(f"• {n} referrals → {h} hour premium" for n, h in sorted(REFERRAL_REWARDS.items()))
     await cb.answer()
@@ -932,7 +954,7 @@ async def refer(cb: CallbackQuery, bot: Bot):
     await log_referral_view(bot, cb.from_user, referrals)
     await cb.message.answer(
         f"🎁 <b>Refer & Earn</b>\n\nTumhare referrals: <b>{referrals}</b>\n\n{rules}\n\n"
-        f"Tumhara link:\nhttps://t.me/{me.username}?start=ref_{cb.from_user.id}"
+        f"Tumhara link:\nhttps://t.me/{me['username']}?start=ref_{cb.from_user.id}"
     )
 
 
@@ -1166,22 +1188,24 @@ async def stats_command(message: Message, bot: Bot):
     history = await db.history(message.from_user.id)
     total_catalog = await db.movie_count(storage_only=True)
     premium_status = f"💎 Premium ({human_left(user['premium_until'])})" if is_premium(user) else "🆓 Free"
-    import datetime as _dt
     d = _dt.date.today().isoformat()
     used_today = user["free_used_today"] if user["last_free_day"] == d else 0
-    from config import FIRST_DAY_FREE, DAILY_FREE
     limit = FIRST_DAY_FREE if is_first_calendar_day(user) else DAILY_FREE
+    remaining = "∞" if is_premium(user) else str(max(0, limit - used_today))
     text = (
         f"📊 <b>Your Stats</b>\n\n"
         f"👤 <b>Name:</b> {escape(message.from_user.full_name)}\n"
         f"🆔 <b>ID:</b> <code>{message.from_user.id}</code>\n"
         f"📋 <b>Plan:</b> {premium_status}\n"
         f"🎬 <b>Movies watched:</b> {len(history)}\n"
-        f"📅 <b>Today's usage:</b> {used_today}/{limit if not is_premium(user) else '∞'}\n"
+        f"📅 <b>Today's usage:</b> {used_today}/{limit if not is_premium(user) else '∞'}"
+        + (f" ({remaining} left today)" if not is_premium(user) else "") + "\n"
         f"👥 <b>Referrals:</b> {user['referrals']}\n"
         f"📚 <b>Total catalog:</b> {total_catalog} movies\n"
     )
-    await message.answer(text)
+    if not is_premium(user) and remaining == "0":
+        text += "\n💎 Premium le lo unlimited movies ke liye!"
+    await message.answer(text, reply_markup=plans_kb(await db.plans()) if not is_premium(user) else InlineKeyboardMarkup(inline_keyboard=[[button("🏠 Home", callback_data="home")]]))
 
 
 @router.callback_query(F.data == "trending")
@@ -1201,7 +1225,12 @@ async def trending_movies(cb: CallbackQuery, bot: Bot):
 async def trending_page(cb: CallbackQuery, bot: Bot):
     """Pagination for trending movies."""
     await cb.answer()
-    page = int(cb.data.split(":")[1])
+    try:
+        page = int(cb.data.split(":")[1])
+        if page < 0:
+            page = 0
+    except (IndexError, ValueError):
+        page = 0
     movies = await db.popular_movies("movie", 30)
     await cb.message.edit_text(
         f"🔥 <b>Trending Movies</b>\n\nPage {page + 1}\nTap karo aur seedha le lo 👇",
@@ -1226,7 +1255,12 @@ async def recent_movies_cb(cb: CallbackQuery, bot: Bot):
 async def recent_page(cb: CallbackQuery, bot: Bot):
     """Pagination for recently added movies."""
     await cb.answer()
-    page = int(cb.data.split(":")[1])
+    try:
+        page = int(cb.data.split(":")[1])
+        if page < 0:
+            page = 0
+    except (IndexError, ValueError):
+        page = 0
     movies = await db.recent_movies("movie", 30, storage_only=True)
     await cb.message.edit_text(
         f"🆕 <b>Recently Added Movies</b>\n\nPage {page + 1}\nTap karo aur seedha le lo 👇",
