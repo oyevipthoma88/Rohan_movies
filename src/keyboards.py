@@ -10,6 +10,8 @@ BUTTON_STYLE = os.getenv("BUTTON_STYLE", "1")
 BUTTON_ICON_CUSTOM_EMOJI_ID = os.getenv("BUTTON_ICON_CUSTOM_EMOJI_ID", "5443038326535759644")
 DEFAULT_BUTTON_STYLE = os.getenv("DEFAULT_BUTTON_STYLE", "primary")
 
+_SUPPORTED_FIELDS = getattr(InlineKeyboardButton, "model_fields", {}) or {}
+
 
 def button(text: str, *, callback_data: str | None = None, url: str | None = None,
            icon_custom_emoji_id: str | None = BUTTON_ICON_CUSTOM_EMOJI_ID,
@@ -20,11 +22,10 @@ def button(text: str, *, callback_data: str | None = None, url: str | None = Non
     exposes them; otherwise the button remains a standard compatible button.
     """
     kwargs = {"text": text, "callback_data": callback_data, "url": url}
-    supported = getattr(InlineKeyboardButton, "model_fields", {})
-    if icon_custom_emoji_id and "icon_custom_emoji_id" in supported:
+    if icon_custom_emoji_id and "icon_custom_emoji_id" in _SUPPORTED_FIELDS:
         kwargs["icon_custom_emoji_id"] = icon_custom_emoji_id
     effective_style = style or DEFAULT_BUTTON_STYLE
-    if effective_style and BUTTON_STYLE and "style" in supported:
+    if effective_style and BUTTON_STYLE and "style" in _SUPPORTED_FIELDS:
         kwargs["style"] = effective_style
     return InlineKeyboardButton(**kwargs)
 
