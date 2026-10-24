@@ -122,11 +122,9 @@ class DB:
         await self.set_default("tutorial", "📘 <b>Movie Bot Tutorial</b>\n\n1. Pehle required channels join karke <b>Verify</b> dabao.\n2. <b>🎬 Movies</b> par tap karo ya DM/group me movie ka naam bhejo. Spelling thodi galat ho to bhi bot closest result dhoond lega.\n3. Result me quality aur size dekhkar movie button tap karo.\n4. Movie milte hi use save ya forward kar lo, kyunki security ke liye owner ke set kiye hue time ke baad message automatically delete ho sakta hai.\n5. Movie available na ho to bot available suggestions dikhayega.\n6. Premium, coupon aur payment ke liye menu ke respective buttons use karo.\n\n⚠️ Sirf legal aur authorised content ka use karo.")
         await self.set_default("online_player_bot", "")
         await self.set_default("verify_channels_limit", "5")
-        await self.set_default("caption_template", "🎬 <b>𝐌𝐨𝐯𝐢𝐞 :</b> {movie_name}\n\n🎥 <b>𝐐𝐮𝐚𝐥𝐢𝐭𝐲 :</b> {quality}\n⏱️ <b>𝐃𝐮𝐫𝐚𝐭𝐢𝐨𝐧 :</b> {duration}\n\n📢 <b>𝐉𝐨𝐢𝐧 :</b> {join}\n🌐 <b>𝐕𝐢𝐬𝐢𝐭 :</b> {username}\n\n⚡ <b>𝐄𝐍𝐣𝐨𝐲 𝐘𝐨𝐮𝐫 𝐌𝐨𝐯𝐢𝐞!</b> 🍿")
+        await self.set_default("caption_template", "🎬 <b>𝐌𝐨𝐯𝐢𝐞 :</b> {movie_name}\n\n🎥 <b>𝐐𝐮𝐚𝐥𝐢𝐭𝐲 :</b> {quality}\n⏱️ <b>𝐃𝐮𝐫𝐚𝐭𝐢𝐨𝐧 :</b> {duration}\n\n📢 <b>𝐉𝐨𝐢𝐧 :</b> {join}\n🌐 <b>𝐕𝐢𝐬𝐢𝐭 :</b> {username}\n\n⚡ <b>𝐄𝐧𝐣𝐨𝐲 𝐘𝐨𝐮𝐫 𝐌𝐨𝐯𝐢𝐞!</b> 🍿")
         await self.set_default("caption_join", "")
         await self.set_default("caption_visit", "")
-        # Existing installs historically defaulted to 0. Migrate that legacy
-        # default once, while preserving any owner-selected value thereafter.
         current_delete = await self.get("auto_delete_minutes", "")
         if not await self.get("auto_delete_default_v2", "") and current_delete in {"", "0"}:
             await self.set("auto_delete_minutes", str(DEFAULT_AUTO_DELETE_MINUTES))
@@ -222,8 +220,6 @@ class DB:
         return state
 
     async def export_tables(self, table_names: tuple[str, ...]) -> dict:
-        """Export only the specified tables — avoids loading 1M+ movies when
-        we only need users/settings for a MongoDB state save."""
         state = {"version": 1, "tables": {}}
         for table in table_names:
             if table not in {"users", "movies", "history", "plans", "coupons", "coupon_uses", "admins", "settings", "stats", "payments", "audit_logs", "delivery_expiry"}:
@@ -233,7 +229,6 @@ class DB:
         return state
 
     async def export_movie_catalog(self, batch_size: int = 5000) -> list[dict]:
-        """Export movies in batches to avoid loading 1M+ rows into memory at once."""
         rows = []
         offset = 0
         while True:
@@ -248,7 +243,6 @@ class DB:
         return rows
 
     async def export_movie_catalog_batch(self, after_msg_id: int = 0, limit: int = 5000) -> list[dict]:
-        """Return one keyset-paginated catalog batch without loading the full catalog."""
         cur = await self.conn.execute(
             "SELECT * FROM movies WHERE msg_id > ? ORDER BY msg_id LIMIT ?",
             (after_msg_id, limit),
@@ -256,14 +250,12 @@ class DB:
         rows = []
         for row in await cur.fetchall():
             item = dict(row)
-            # Only lightweight metadata leaves for MongoDB — never media bytes.
             if MONGO_CAPTION_LIMIT and isinstance(item.get("caption"), str):
                 item["caption"] = item["caption"][:MONGO_CAPTION_LIMIT]
             rows.append(item)
         return rows
 
     async def bulk_upsert_movies(self, rows: list[tuple]) -> int:
-        """Fast path for big scans: one executemany instead of per-row logic."""
         if not rows:
             return 0
         await self.conn.executemany(
@@ -406,10 +398,6 @@ class DB:
         return True
 
     async def has_duplicate_movie(self, file_id: str = "", caption: str = "") -> bool:
-        """Check whether a deliverable movie already exists by file or exact caption.
-
-        Uses the same whitespace+casefold normalization as get_dedup_sets so that
-        live auto-transfer and scan-time dedup agree on what counts as a duplicate."""
         file_id = (file_id or "").strip()
         caption_norm = " ".join((caption or "").split()).strip().casefold()
         if file_id:
@@ -429,7 +417,6 @@ class DB:
         return False
 
     async def search_movies_sql(self, query: str, content_type: str = "", limit: int = 20) -> list[aiosqlite.Row]:
-        """SQL-based pre-filter for fast search on large catalogs."""
         safe_type = content_type if content_type in {"movie", "series", "anime"} else ""
         q = f"%{query}%"
         if safe_type:
@@ -445,7 +432,6 @@ class DB:
         return await cur.fetchall()
 
     async def search_titles_for_spelling(self, query: str, limit: int = 200) -> list[str]:
-        """Return candidate titles for spelling correction without loading all rows."""
         q = f"%{query[:3]}%" if len(query) >= 3 else f"%{query}%"
         cur = await self.conn.execute(
             "SELECT title FROM movies WHERE storage_msg_id > 0 AND LOWER(title) LIKE LOWER(?) LIMIT ?",
@@ -475,10 +461,6 @@ class DB:
         return await cur.fetchall()
 
     async def get_dedup_sets(self) -> tuple[set[str], set[str]]:
-        """Return (file_ids, normalized_captions) for dedup during scanning.
-
-        Uses SQL to fetch only the two columns needed instead of full rows.
-        For 100k+ movies this is ~10x lighter than all_movies()."""
         cur = await self.conn.execute(
             "SELECT file_id, caption FROM movies WHERE storage_msg_id > 0"
         )
@@ -494,10 +476,6 @@ class DB:
         return files, captions
 
     async def bulk_check_duplicates(self, items: list[dict]) -> list[dict]:
-        """Batch-check a list of {file_key, caption_key} dicts against the DB.
-
-        Returns only the items that are NOT duplicates. Uses a single SQL
-        query per batch instead of one query per item."""
         if not items:
             return []
         file_keys = [i["file_key"] for i in items if i.get("file_key")]
@@ -513,7 +491,6 @@ class DB:
         caption_keys = [i["caption_key"] for i in items if i.get("caption_key")]
         existing_captions: set[str] = set()
         if caption_keys:
-            # Normalize stored captions the same way as the check side.
             cur = await self.conn.execute(
                 "SELECT caption FROM movies WHERE storage_msg_id > 0 AND caption IS NOT NULL"
             )
@@ -558,7 +535,6 @@ class DB:
         await self.conn.commit()
 
     async def popular_movies(self, content_type: str = "", limit: int = 10) -> list[aiosqlite.Row]:
-        """Rank deliverable movies by successful deliveries and unique users."""
         safe_limit = max(1, min(int(limit), 15))
         safe_type = content_type if content_type in {"movie", "series", "anime"} else ""
         type_clause = " AND m.content_type=?" if safe_type else ""
@@ -580,7 +556,6 @@ class DB:
 
     async def recent_movies(self, content_type: str = "", limit: int = 10,
                             storage_only: bool = False) -> list[aiosqlite.Row]:
-        """Return recent catalog rows, optionally restricted to deliverable storage posts."""
         safe_limit = max(1, min(int(limit), 15))
         safe_type = content_type if content_type in {"movie", "series", "anime"} else ""
         filter_sql = "WHERE m.storage_msg_id > 0" if storage_only else "WHERE 1=1"
@@ -619,12 +594,6 @@ class DB:
         return await cur.fetchall()
 
     async def sync_plan_catalog(self) -> None:
-        """Keep the plan catalog aligned with DEFAULT_PLANS.
-
-        Labels, emojis, badges, duration and ordering always follow the code;
-        prices are owner-controlled and only reset when PLAN_PRICING_REVISION
-        changes (so a restored old MongoDB state cannot bring back old prices).
-        """
         reset_prices = (await self.get("plan_pricing_revision", "")) != PLAN_PRICING_REVISION
         for code, label, price, days, emoji, tag, sort in DEFAULT_PLANS:
             cur = await self.conn.execute("SELECT price FROM plans WHERE code=?", (code,))
@@ -664,7 +633,6 @@ class DB:
         await self.conn.commit()
 
     async def redeem_coupon(self, code: str, user_id: int) -> Optional[int]:
-        """Redeem once per user and reserve one use atomically under concurrency."""
         code = "".join((code or "").upper().split())
         if not code:
             return None
@@ -715,7 +683,6 @@ class DB:
         await self.conn.commit()
 
     async def approve_payment(self, pid: int, user_id: int, days: float) -> Optional[int]:
-        """Approve one pending payment and grant its premium in one transaction."""
         try:
             await self.conn.execute("BEGIN IMMEDIATE")
             payment_cur = await self.conn.execute(
