@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import time
 
@@ -9,7 +10,7 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from config import LOG_CHANNEL, MAIN_DATA, ONLINE_PLAYER_BOT, OWNER_IDS, SCAN_START_ID, STORAGE_CHANNEL
 from log_helper import log_owner_action, log_broadcast, log_command
@@ -122,11 +123,6 @@ def _norm_plan_key(text: str) -> str:
 
 
 def parse_plan_price_lines(text: str, plans: list) -> tuple[list[tuple[str, int, str | None]], list[str]]:
-    """Parse owner input into (code, price, tag_or_None) updates.
-
-    Accepts one line or the whole plan list at once, with or without ₹ and
-    badges:  `1month 149`, `📅 1 Month — ₹149 — ⭐ BEST VALUE`, `7day 69 POPULAR`.
-    """
     by_key: dict[str, str] = {}
     for plan in plans:
         by_key[_norm_plan_key(plan["code"])] = plan["code"]
@@ -142,8 +138,6 @@ def parse_plan_price_lines(text: str, plans: list) -> tuple[list[tuple[str, int,
         digit_positions = [i for i, t in enumerate(tokens) if t.isdigit() and i > 0]
         code = None
         price_at = -1
-        # Try the right-most number first: that handles both `1month 149` and a
-        # pasted line like `📅 1 Month — ₹149 — ⭐ BEST VALUE`.
         for index in reversed(digit_positions):
             name = " ".join(tokens[:index])
             candidate = by_key.get(_norm_plan_key(name))
@@ -376,12 +370,9 @@ async def set_caption(message: Message, state: FSMContext):
 
 
 def _verify_target(raw: str) -> str:
-    """Accept public usernames, numeric IDs, AND private invite links."""
     value = raw.strip().rstrip("/")
     value = re.sub(r"^https?://t\.me/", "", value, flags=re.I)
-    # Private invite links: +abc123 or joinchat/abc123
     if value.startswith("+") or value.lower().startswith("joinchat/"):
-        # Return the full invite link format for private channels
         invite_code = value.lstrip("+")
         if value.lower().startswith("joinchat/"):
             invite_code = value[9:]
@@ -492,9 +483,6 @@ async def op_broadcast(cb: CallbackQuery, state: FSMContext):
 async def do_broadcast(message: Message, bot: Bot, state: FSMContext):
     await state.clear()
     users = await db.all_user_ids()
-
-    # Collect all message IDs to forward. If the owner sent an album (media
-    # group), forward every item so the whole group reaches each user intact.
     forward_ids = [message.message_id]
     media_group_id = getattr(message, "media_group_id", None)
     if media_group_id:
@@ -507,17 +495,12 @@ async def do_broadcast(message: Message, bot: Bot, state: FSMContext):
             forward_ids.sort()
         except Exception:
             forward_ids = [message.message_id]
-
     note = await message.answer(
         f"📢 Forwarding to {len(users)} users"
         f" ({len(forward_ids)} message{'s' if len(forward_ids) > 1 else ''})..."
     )
     await log_owner_action(bot, message.from_user.id, "broadcast_start",
                            f"To {len(users)} users, {len(forward_ids)} msgs")
-
-    # Test one forward first to detect protected content. If the source channel
-    # has "Restrict saving content" ON, forward_message will fail — we switch to
-    # copy_message so the broadcast still goes out to every user.
     use_copy = False
     try:
         test_fwd = await bot.forward_message(
@@ -534,9 +517,7 @@ async def do_broadcast(message: Message, bot: Bot, state: FSMContext):
         if "forward" in low and ("restrict" in low or "protected" in low or "can't" in low):
             use_copy = True
             logging.info("Broadcast: source is forward-restricted, using copy_message")
-
     limiter = asyncio.Semaphore(15)
-
     permanent_errors = 0
     protected_errors = 0
 
@@ -563,7 +544,6 @@ async def do_broadcast(message: Message, bot: Bot, state: FSMContext):
                     except Exception as exc:
                         low = str(exc).lower()
                         if "can't be forwarded" in low or "chat_forwards_restricted" in low or ("forward" in low and "restrict" in low):
-                            # Try copy as fallback for this specific user
                             try:
                                 await bot.copy_message(
                                     chat_id=uid,
@@ -638,7 +618,6 @@ async def do_setchannel(message: Message, bot: Bot, state: FSMContext):
 
 
 async def _clean_main_data_duplicates_actual(bot: Bot, start_id: int, end_id: int, progress=None) -> tuple[int, int, int]:
-    """Inspect real MAIN_DATA history, then delete older same-caption posts."""
     from mtproto_importer import find_duplicate_caption_ids
     scanned, skipped, duplicate_ids = await find_duplicate_caption_ids(
         MAIN_DATA, min_id=end_id, max_id=start_id
@@ -669,7 +648,6 @@ async def _clean_main_data_duplicates_actual(bot: Bot, start_id: int, end_id: in
 
 
 async def _clean_main_data_duplicates_fast(bot: Bot, start_id: int, end_id: int, progress=None) -> tuple[int, int, int]:
-    """Delete older same-caption MAIN_DATA posts using the local catalog index."""
     rows = await db.all_movies(storage_only=True)
     groups = {}
     scanned = skipped = 0
@@ -691,7 +669,6 @@ async def _clean_main_data_duplicates_fast(bot: Bot, start_id: int, end_id: int,
             try:
                 await bot.delete_message(MAIN_DATA, mid)
             except Exception as exc:
-                # If the post is already gone, stale local rows can be removed.
                 if "not found" not in str(exc).lower() and "message_id_invalid" not in str(exc).lower():
                     logging.warning("Could not delete duplicate MAIN_DATA/%s: %s", mid, exc)
                     return False
@@ -807,16 +784,17 @@ async def diag(message: Message, bot: Bot):
              f"🗂 Log channel: <code>{LOG_CHANNEL or 'not set'}</code>",
              f"🎬 Indexed movies in storage: <b>{await db.movie_count(storage_only=True)}</b>",
              f"👥 Registered users: <b>{await db.user_count()}</b>"]
+    bot_me = await bot.me()
     if ch:
         try:
-            me = await bot.get_chat_member(ch, (await bot.me()).id)
+            me = await bot.get_chat_member(ch, bot_me.id)
             lines.append(f"🤖 Bot status in channel: <b>{me.status}</b>")
         except Exception as e:
             lines.append(f"⚠️ Channel access error: <code>{e}</code>")
     try:
         main_chat = await bot.get_chat(MAIN_DATA)
         lines.append(f"📦 MAIN_DATA: <b>{main_chat.title or 'OK'}</b> <code>{MAIN_DATA}</code>")
-        me_main = await bot.get_chat_member(MAIN_DATA, (await bot.me()).id)
+        me_main = await bot.get_chat_member(MAIN_DATA, bot_me.id)
         lines.append(f"🤖 Bot status in MAIN_DATA: <b>{me_main.status}</b>")
     except Exception as e:
         lines.append(f"⚠️ MAIN_DATA access error: <code>{e}</code>")
@@ -876,7 +854,6 @@ async def scanfull_command(message: Message, bot: Bot, state: FSMContext):
     await log_command(bot, message.from_user, "scanall")
     await state.set_state(Own.scan)
     arg = (message.text or "").partition(" ")[2].strip().lower()
-    # "fresh" or "restart" clears resume cursors so the scan starts from scratch.
     if arg in {"fresh", "restart"}:
         from config import MAIN_CHANNELS
         channels = MAIN_CHANNELS if MAIN_CHANNELS else []
@@ -889,7 +866,6 @@ async def scanfull_command(message: Message, bot: Bot, state: FSMContext):
 
 @router.message(Command("scanmain"))
 async def scanmain_command(message: Message, bot: Bot):
-    """Fast MAIN_DATA-only scan with automatic retry and resume."""
     if not await is_owner(message.from_user.id):
         return await message.answer("❌ Sirf owner `/scanmain` chala sakta hai.")
     await log_command(bot, message.from_user, "scanmain")
@@ -936,7 +912,6 @@ async def scanmain_command(message: Message, bot: Bot):
                 reply_markup=owner_panel_kb(),
             )
 
-        # Persist immediately: Heroku ka filesystem restart par wipe ho jata hai.
         from mongo_store import save_movie_catalog, save_non_movie_state
         catalog_saved, state_saved = await asyncio.gather(save_movie_catalog(), save_non_movie_state())
         if not catalog_saved or not state_saved:
@@ -972,8 +947,6 @@ async def scan_command(message: Message, bot: Bot, state: FSMContext):
 async def do_scan(message: Message, bot: Bot, state: FSMContext, force_main_data: bool = False, scan_args: str = "", enumerate_history: bool = False):
     start_id, end_id = 0, 0
     if message.forward_from_message_id:
-        # A forwarded post is only a trigger. Do not use its ID as the scan ceiling;
-        # that made forwarding message 88 scan only 88→1.
         start_id = SCAN_START_ID
         end_id = 1
     else:
@@ -1003,7 +976,6 @@ async def do_scan(message: Message, bot: Bot, state: FSMContext, force_main_data
 
     await db.set("scan_last_start", str(scan_start))
     await db.set("scan_last_end", str(scan_end))
-    # --- Instant start: validate everything in parallel, send started msg ASAP ---
     await state.clear()
     started = time.time()
 
@@ -1022,13 +994,11 @@ async def do_scan(message: Message, bot: Bot, state: FSMContext, force_main_data
                 reply_markup=owner_panel_kb(),
             )
 
-    # Send the "started" message immediately so user sees instant feedback
     note = await message.answer(
         f"⚡ <b>Fast scan started</b>\n"
         "Telethon se newest-first direct read + batch index…"
     )
 
-    # Parallel validation: check MAIN_DATA + all source channels at once
     if force_main_data:
         info = {"id": MAIN_DATA, "title": "MAIN_DATA", "username": ""}
         src = MAIN_DATA
@@ -1052,7 +1022,6 @@ async def do_scan(message: Message, bot: Bot, state: FSMContext, force_main_data
                 reply_markup=owner_panel_kb(),
             )
 
-    # Validate all channels in parallel (MAIN_DATA + all source channels)
     async def _check_chat(cid):
         try:
             return await bot.get_chat(cid)
@@ -1134,8 +1103,6 @@ async def do_scan(message: Message, bot: Bot, state: FSMContext, force_main_data
             "Check karo bot movie channel + log channel dono me admin hai (/diag).",
             reply_markup=owner_panel_kb())
 
-    # Heroku's filesystem is ephemeral. Persist each completed scan now rather
-    # than waiting for the periodic task or a best-effort SIGTERM shutdown.
     from mongo_store import save_movie_catalog, save_non_movie_state
     catalog_saved, state_saved = await asyncio.gather(
         save_movie_catalog(),
@@ -1166,7 +1133,6 @@ async def do_scan(message: Message, bot: Bot, state: FSMContext, force_main_data
 
 @router.message(Command("transferstatus"))
 async def transfer_status(message: Message, bot: Bot):
-    """Show multi-bot transfer system status"""
     if not await is_owner(message.from_user.id):
         return
     await log_command(bot, message.from_user, "transferstatus")
@@ -1190,7 +1156,6 @@ async def transfer_status(message: Message, bot: Bot):
 
 @router.message(Command("reactivatebots"))
 async def reactivate_bots_cmd(message: Message, bot: Bot):
-    """Reactivate deactivated helper bots"""
     if not await is_owner(message.from_user.id):
         return
     await log_command(bot, message.from_user, "reactivatebots")
@@ -1201,7 +1166,6 @@ async def reactivate_bots_cmd(message: Message, bot: Bot):
 
 @router.message(Command("setsupport"))
 async def set_support_url(message: Message, bot: Bot):
-    """Set support URL for 'movie not found' button."""
     if not await is_owner(message.from_user.id):
         return
     await log_command(bot, message.from_user, "setsupport")
@@ -1227,7 +1191,6 @@ async def set_support_url(message: Message, bot: Bot):
 
 @router.message(Command("ban"))
 async def ban_user_cmd(message: Message, bot: Bot):
-    """Ban a user from using the bot."""
     if not await is_owner(message.from_user.id):
         return
     await log_command(bot, message.from_user, "ban")
@@ -1250,7 +1213,6 @@ async def ban_user_cmd(message: Message, bot: Bot):
 
 @router.message(Command("unban"))
 async def unban_user_cmd(message: Message, bot: Bot):
-    """Unban a previously banned user."""
     if not await is_owner(message.from_user.id):
         return
     await log_command(bot, message.from_user, "unban")
@@ -1271,7 +1233,6 @@ async def unban_user_cmd(message: Message, bot: Bot):
 
 @router.message(Command("userinfo"))
 async def user_info_cmd(message: Message, bot: Bot):
-    """Show details about a specific user."""
     if not await is_owner(message.from_user.id):
         return
     await log_command(bot, message.from_user, "userinfo")
@@ -1311,8 +1272,7 @@ async def op_setjoin(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id not in OWNER_IDS:
         await cb.answer("Only owner", show_alert=True)
         return
-    import os as _os
-    cur = await db.get("join_channel", "") or _os.getenv("JOIN_CHANNEL", "") or "-"
+    cur = await db.get("join_channel", "") or os.getenv("JOIN_CHANNEL", "") or "-"
     await state.set_state(_JoinVisitFlow.waiting_join)
     await cb.message.answer(f"📢 Current Join: <code>{cur}</code>\n\nNaya username/URL bhejo:")
     await cb.answer()
@@ -1332,8 +1292,7 @@ async def op_setvisit(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id not in OWNER_IDS:
         await cb.answer("Only owner", show_alert=True)
         return
-    import os as _os
-    cur = await db.get("visit_channel", "") or _os.getenv("VISIT_CHANNEL", "") or "-"
+    cur = await db.get("visit_channel", "") or os.getenv("VISIT_CHANNEL", "") or "-"
     await state.set_state(_JoinVisitFlow.waiting_visit)
     await cb.message.answer(f"🌐 Current Visit: <code>{cur}</code>\n\nNaya username/URL bhejo:")
     await cb.answer()
@@ -1352,7 +1311,6 @@ async def op_setvisit_val(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "op:helpers")
 async def op_helpers(cb: CallbackQuery, bot: Bot):
-    """Show helper bot pool status and controls."""
     if not await is_owner(cb.from_user.id):
         return await cb.answer("Only owner", show_alert=True)
     await cb.answer()
@@ -1374,7 +1332,6 @@ async def op_helpers(cb: CallbackQuery, bot: Bot):
     if not pool["bots"]:
         text += "\n⚠️ <b>Koi helper bot configure nahi hai.</b>\n\nHelper bots add karne ke liye .env me <code>HELPER_BOT_TOKENS</code> set karo:\n<code>HELPER_BOT_TOKENS=123:AAA,456:BBB,789:CCC</code>\n\nHar helper bot ko source channels me admin banakar add karo. Wo automatically naye movies ko MAIN_DATA me transfer karenge."
 
-    from aiogram.types import InlineKeyboardMarkup
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [button("🔄 Reactivate All Bots", callback_data="op:reactivate")],
         [button("📊 Refresh Stats", callback_data="op:helpers")],
@@ -1398,7 +1355,6 @@ async def op_reactivate(cb: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data == "op:autotransfer")
 async def op_autotransfer(cb: CallbackQuery, bot: Bot):
-    """Toggle instant auto-transfer from source channels."""
     if not await is_owner(cb.from_user.id):
         return await cb.answer("Only owner", show_alert=True)
     await cb.answer()
@@ -1412,7 +1368,6 @@ async def op_autotransfer(cb: CallbackQuery, bot: Bot):
         "Forward fail ho to copy, copy fail ho to MTProto fallback.\n\n"
         "<b>OFF</b>: Har naye movie ke liye owner ko manual approval request aati hai."
     )
-    from aiogram.types import InlineKeyboardMarkup
     new_val = "0" if current == "1" else "1"
     new_label = "🔴 Disable Auto-Transfer" if current == "1" else "🟢 Enable Auto-Transfer"
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1440,7 +1395,6 @@ async def op_autotransfer_set(cb: CallbackQuery):
 
 @router.callback_query(F.data == "op:groupmode")
 async def op_groupmode(cb: CallbackQuery):
-    """Toggle group search mode on/off."""
     if not await is_owner(cb.from_user.id):
         return await cb.answer("Only owner", show_alert=True)
     await cb.answer()
@@ -1454,7 +1408,6 @@ async def op_groupmode(cb: CallbackQuery):
         "<b>OFF</b>: Bot groups me koi bhi search ya message ka jawab nahi dega. "
         "Sirf DM me search chalegi."
     )
-    from aiogram.types import InlineKeyboardMarkup
     new_val = "0" if current == "1" else "1"
     new_label = "🔴 Disable Group Search" if current == "1" else "🟢 Enable Group Search"
     kb = InlineKeyboardMarkup(inline_keyboard=[
