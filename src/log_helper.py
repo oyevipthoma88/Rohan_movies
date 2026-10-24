@@ -4,6 +4,8 @@ Every user/bot action sends a detailed log message to LOG_CHANNEL so the
 owner has full visibility into bot activity. Each function is a no-op when
 LOG_CHANNEL is not configured.
 """
+from __future__ import annotations
+
 import time
 import logging
 from html import escape

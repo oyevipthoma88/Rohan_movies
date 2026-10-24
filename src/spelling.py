@@ -1,5 +1,7 @@
 """Lightweight spelling correction for movie name searches.
 Uses rapidfuzz for fuzzy matching against the known catalog titles."""
+from __future__ import annotations
+
 import re
 from typing import Optional
 
@@ -40,7 +42,7 @@ COMMON_FIXES = {
 }
 
 
-def correct_spelling(query: str, catalog_titles: list[str] = None) -> Optional[str]:
+def correct_spelling(query: str, catalog_titles: Optional[list[str]] = None) -> Optional[str]:
     """Try to correct common spelling mistakes in movie names.
 
     First checks a manual common-fixes map, then uses fuzzy matching
@@ -78,7 +80,7 @@ def correct_spelling(query: str, catalog_titles: list[str] = None) -> Optional[s
     return None
 
 
-def suggest_corrections(query: str, catalog_titles: list[str], limit: int = 3) -> list[str]:
+def suggest_corrections(query: str, catalog_titles: Optional[list[str]] = None, limit: int = 3) -> list[str]:
     """Return up to `limit` suggested corrections for a misspelled query."""
     q_norm = _normalize(query)
     if not q_norm or not catalog_titles:
