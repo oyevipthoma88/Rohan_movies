@@ -162,24 +162,26 @@ class TransferManager:
 
 
 async def _mtproto_transfer(src_chat: int, msg_id: int, dest_chat: int) -> int:
-    """Use Telethon user session to forward a message when all helper bots fail."""
+    """Use Telethon user session to forward a message when all helper bots fail.
+
+    Reuses the shared client from mtproto_importer so we don't create and tear
+    down a fresh TelegramClient (connect+authorize) on every single fallback."""
     from config import TG_API_ID, TG_API_HASH, TG_SESSION
     if not TG_API_ID or not TG_API_HASH or not TG_SESSION:
         return 0
-    from telethon import TelegramClient
-    from telethon.sessions import StringSession
-    client = TelegramClient(StringSession(TG_SESSION), int(TG_API_ID), TG_API_HASH)
-    await client.connect()
     try:
-        if not await client.is_user_authorized():
+        from mtproto_importer import _get_client
+        client = await _get_client()
+        if client is None:
             return 0
         msg = await client.get_messages(src_chat, ids=msg_id)
         if not msg:
             return 0
         forwarded = await msg.forward_to(dest_chat)
         return forwarded.id if forwarded else 0
-    finally:
-        await client.disconnect()
+    except Exception as e:
+        logger.warning("MTProto transfer error: %s", e)
+        return 0
 
 
 transfer_manager = TransferManager()

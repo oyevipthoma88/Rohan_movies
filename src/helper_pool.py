@@ -118,6 +118,8 @@ class HelperBotPool:
         for bot in self._bots:
             if not bot.is_active:
                 if await bot.initialize():
+                    bot.transfers_failed = 0
+                    bot.last_error = ""
                     logger.info(f"Bot @{bot.username} reactivated")
 
     def get_stats(self) -> Dict:
