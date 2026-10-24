@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import time
 from pathlib import Path
 
@@ -120,7 +122,7 @@ class DB:
         await self.set_default("tutorial", "📘 <b>Movie Bot Tutorial</b>\n\n1. Pehle required channels join karke <b>Verify</b> dabao.\n2. <b>🎬 Movies</b> par tap karo ya DM/group me movie ka naam bhejo. Spelling thodi galat ho to bhi bot closest result dhoond lega.\n3. Result me quality aur size dekhkar movie button tap karo.\n4. Movie milte hi use save ya forward kar lo, kyunki security ke liye owner ke set kiye hue time ke baad message automatically delete ho sakta hai.\n5. Movie available na ho to bot available suggestions dikhayega.\n6. Premium, coupon aur payment ke liye menu ke respective buttons use karo.\n\n⚠️ Sirf legal aur authorised content ka use karo.")
         await self.set_default("online_player_bot", "")
         await self.set_default("verify_channels_limit", "5")
-        await self.set_default("caption_template", "🎬 <b>𝐌𝐨𝐯𝐢𝐞 :</b> {movie_name}\n\n🎥 <b>𝐐𝐮𝐚𝐥𝐢𝐭𝐲 :</b> {quality}\n⏱️ <b>𝐃𝐮𝐫𝐚𝐭𝐢𝐨𝐧 :</b> {duration}\n\n📢 <b>𝐉𝐨𝐢𝐧 :</b> {join}\n🌐 <b>𝐕𝐢𝐬𝐢𝐭 :</b> {username}\n\n⚡ <b>𝐄𝐧𝐣𝐨𝐲 𝐘𝐨𝐮𝐫 𝐌𝐨𝐯𝐢𝐞!</b> 🍿")
+        await self.set_default("caption_template", "🎬 <b>𝐌𝐨𝐯𝐢𝐞 :</b> {movie_name}\n\n🎥 <b>𝐐𝐮𝐚𝐥𝐢𝐭𝐲 :</b> {quality}\n⏱️ <b>𝐃𝐮𝐫𝐚𝐭𝐢𝐨𝐧 :</b> {duration}\n\n📢 <b>𝐉𝐨𝐢𝐧 :</b> {join}\n🌐 <b>𝐕𝐢𝐬𝐢𝐭 :</b> {username}\n\n⚡ <b>𝐄𝐍𝐣𝐨𝐲 𝐘𝐨𝐮𝐫 𝐌𝐨𝐯𝐢𝐞!</b> 🍿")
         await self.set_default("caption_join", "")
         await self.set_default("caption_visit", "")
         # Existing installs historically defaulted to 0. Migrate that legacy
