@@ -203,9 +203,12 @@ def is_premium(user) -> bool:
 
 
 _QUOTA_LOCKS: dict[int, asyncio.Lock] = {}
+_QUOTA_LOCK_MAX = 5000
 
 
 def _quota_lock(user_id: int) -> asyncio.Lock:
+    if len(_QUOTA_LOCKS) >= _QUOTA_LOCK_MAX:
+        _QUOTA_LOCKS.clear()
     return _QUOTA_LOCKS.setdefault(int(user_id), asyncio.Lock())
 
 
