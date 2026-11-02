@@ -248,3 +248,39 @@ async def log_new_movie_added(bot: Bot, title: str, quality: str, source_chat: i
         ("📊 <b>Total Catalog:</b>", str(total_catalog)),
     ]
     await log_event(bot, "#new #movie #auto_transfer", "New Movie Added to MAIN_DATA", fields)
+
+
+async def log_broadcast_start(bot: Bot, owner_id: int, total_users: int, msg_count: int):
+    await log_event(
+        bot,
+        "#broadcast #start",
+        "Broadcast Started",
+        [
+            (" Owner ID:", str(owner_id)),
+            (" Total Users:", str(total_users)),
+            (" Messages:", str(msg_count)),
+        ],
+    )
+
+async def log_broadcast_user(bot: Bot, user_id: int, method: str, error: str = ""):
+    fields = [(" User ID:", str(user_id)), (" Method:", method)]
+    if error:
+        fields.append((" Error:", error))
+    await log_event(
+        bot,
+        "#broadcast #user",
+        "Broadcast Delivery",
+        fields,
+    )
+
+async def log_group_ignored(bot: Bot, user, chat_id: int, text: str):
+    await log_event(
+        bot,
+        "#group #ignored",
+        "Group Message Ignored (no command)",
+        [
+            (" Chat ID:", str(chat_id)),
+            (" Text:", text[:50]),
+        ],
+        user=user,
+    )

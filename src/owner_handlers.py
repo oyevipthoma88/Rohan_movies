@@ -529,18 +529,30 @@ async def do_broadcast(message: Message, bot: Bot, state: FSMContext):
                 success = True
                 for mid in forward_ids:
                     try:
-                        if use_copy:
-                            await bot.copy_message(
-                                chat_id=uid,
-                                from_chat_id=message.chat.id,
-                                message_id=mid,
-                            )
-                        else:
+                        try:
                             await bot.forward_message(
                                 chat_id=uid,
                                 from_chat_id=message.chat.id,
                                 message_id=mid,
                             )
+                        except Exception as fwd_exc:
+                            low = str(fwd_exc).lower()
+                            if (
+                                "can't be forwarded" in low
+                                or "chat_forwards_restricted" in low
+                                or ("forward" in low and "restrict" in low)
+                            ):
+                                await bot.copy_message(
+                                    chat_id=uid,
+                                    from_chat_id=message.chat.id,
+                                    message_id=mid,
+                                )
+                                logging.warning(
+                                    "Broadcast: forward restricted for uid=%s mid=%s, copied instead. Error: %s",
+                                    uid, mid, fwd_exc,
+                                )
+                            else:
+                                raise
                     except Exception as exc:
                         low = str(exc).lower()
                         if "can't be forwarded" in low or "chat_forwards_restricted" in low or ("forward" in low and "restrict" in low):

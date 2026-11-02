@@ -499,8 +499,10 @@ async def direct_dm_search(message: Message, bot: Bot, state: FSMContext):
     await do_search(message, message.text.strip(), state, bot)
 
 
-@router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.text, ~F.text.startswith("/"))
+# Group search disabled — only /movie command triggers search in groups
+# @router.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.text, ~F.text.startswith("/"))
 async def direct_group_search(message: Message, bot: Bot, state: FSMContext):
+    return  # DISABLED: group needs /movie command
     """In groups, only respond when the bot is @mentioned or replied to.
 
     Owner can disable group search entirely via the Group Mode toggle in the
