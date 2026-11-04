@@ -24,7 +24,13 @@ CREATE TABLE IF NOT EXISTS users (
     referred_by INTEGER DEFAULT 0,
     referrals INTEGER DEFAULT 0,
     rewarded_upto INTEGER DEFAULT 0,
-    banned INTEGER DEFAULT 0
+    banned INTEGER DEFAULT 0,
+    language_code TEXT DEFAULT '',
+    tg_premium INTEGER DEFAULT 0,
+    last_seen INTEGER DEFAULT 0,
+    last_action TEXT DEFAULT '',
+    actions INTEGER DEFAULT 0,
+    blocked_bot INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS movies (
     msg_id INTEGER PRIMARY KEY,
@@ -97,6 +103,7 @@ class DB:
     _USER_UPDATE_FIELDS = frozenset({
         "username", "name", "premium_until", "free_used_today", "last_free_day",
         "first_bonus_used", "referred_by", "referrals", "rewarded_upto", "banned",
+        "language_code", "tg_premium", "last_seen", "last_action", "actions", "blocked_bot",
     })
 
     async def init(self) -> None:
@@ -133,6 +140,13 @@ class DB:
         await self.set_default("auto_delete_default_v2", "1")
 
     async def _migrate(self) -> None:
+        cur = await self.conn.execute("PRAGMA table_info(users)")
+        user_cols = {r["name"] for r in await cur.fetchall()}
+        for col, ddl in (("language_code", "TEXT DEFAULT ''"), ("tg_premium", "INTEGER DEFAULT 0"),
+                         ("last_seen", "INTEGER DEFAULT 0"), ("last_action", "TEXT DEFAULT ''"),
+                         ("actions", "INTEGER DEFAULT 0"), ("blocked_bot", "INTEGER DEFAULT 0")):
+            if user_cols and col not in user_cols:
+                await self.conn.execute(f"ALTER TABLE users ADD COLUMN {col} {ddl}")
         cur = await self.conn.execute("PRAGMA table_info(plans)")
         plan_cols = {r["name"] for r in await cur.fetchall()}
         if plan_cols:
@@ -309,6 +323,12 @@ class DB:
     async def add_user(self, user_id: int, username: str, name: str, referred_by: int = 0) -> bool:
         cur = await self.conn.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,))
         if await cur.fetchone():
+            if username or (name and name != "gifted"):
+                await self.conn.execute(
+                    "UPDATE users SET username=COALESCE(NULLIF(?,''),username), name=COALESCE(NULLIF(?,''),name) WHERE user_id=?",
+                    (username or "", "" if name == "gifted" else (name or ""), user_id),
+                )
+                await self.conn.commit()
             return False
         await self.conn.execute(
             "INSERT INTO users (user_id,username,name,joined_at,referred_by) VALUES (?,?,?,?,?)",
@@ -318,6 +338,43 @@ class DB:
             await self.conn.execute("UPDATE users SET referrals=referrals+1 WHERE user_id=?", (referred_by,))
         await self.conn.commit()
         return True
+
+    async def track_user(self, user_id: int, username: str, name: str, language_code: str = "",
+                         tg_premium: bool = False, action: str = "") -> bool:
+        """Insert or refresh a user on ANY interaction. Returns True if user is new.
+
+        Keeps name/username fresh (old rows like 'gifted' or blank get fixed),
+        counts actions and records last activity.
+        """
+        now = int(time.time())
+        cur = await self.conn.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,))
+        exists = await cur.fetchone() is not None
+        if exists:
+            await self.conn.execute(
+                "UPDATE users SET username=?, name=?, language_code=?, tg_premium=?, last_seen=?, "
+                "last_action=?, actions=COALESCE(actions,0)+1, blocked_bot=0 WHERE user_id=?",
+                (username or "", name or "", language_code or "", int(bool(tg_premium)), now,
+                 (action or "")[:200], user_id),
+            )
+        else:
+            await self.conn.execute(
+                "INSERT INTO users (user_id,username,name,joined_at,language_code,tg_premium,last_seen,last_action,actions) "
+                "VALUES (?,?,?,?,?,?,?,?,1)",
+                (user_id, username or "", name or "", now, language_code or "", int(bool(tg_premium)), now,
+                 (action or "")[:200]),
+            )
+        await self.conn.commit()
+        return not exists
+
+    async def set_blocked(self, user_id: int, blocked: bool) -> None:
+        await self.conn.execute("UPDATE users SET blocked_bot=? WHERE user_id=?", (int(blocked), user_id))
+        await self.conn.commit()
+
+    async def broadcast_user_ids(self) -> list[int]:
+        cur = await self.conn.execute(
+            "SELECT user_id FROM users WHERE banned=0 AND COALESCE(blocked_bot,0)=0 ORDER BY user_id"
+        )
+        return [r["user_id"] for r in await cur.fetchall()]
 
     async def user(self, user_id: int) -> Optional[aiosqlite.Row]:
         cur = await self.conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
