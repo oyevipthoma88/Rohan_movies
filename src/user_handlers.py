@@ -372,6 +372,16 @@ async def catalog_command(message: Message, bot: Bot, state: FSMContext, content
         await message.answer("🔒 Pehle channels join karke /start par Verify dabao.")
         return
     query = (message.text or "").partition(" ")[2].strip()
+    if message.chat.type in {ChatType.GROUP, ChatType.SUPERGROUP}:
+        from group_guard import group_usage_text
+        if not query:
+            await message.reply(group_usage_text(content_type))
+            return
+        await state.update_data(content_type=content_type)
+        await log_group_search(bot, message.from_user, message.chat.id, query, 0)
+        await do_search(message, query, state, bot)
+        await state.clear()  # group me search mode kabhi on nahi rehta
+        return
     await state.update_data(content_type=content_type)
     if query:
         await do_search(message, query, state)
@@ -460,7 +470,7 @@ async def cancel_command(message: Message, bot: Bot, state: FSMContext):
     await message.answer("Active search cancel ho gaya. Naya search /movie se start karo.")
 
 
-@router.message(Flow.searching, F.voice | F.audio)
+@router.message(Flow.searching, F.chat.type == ChatType.PRIVATE, F.voice | F.audio)
 async def voice_search(message: Message, bot: Bot, state: FSMContext):
     note = await message.answer("🎤 Voice sun raha hoon...")
     fd, path = tempfile.mkstemp(prefix="rohan_voice_", suffix=".ogg")
@@ -487,7 +497,7 @@ async def voice_search(message: Message, bot: Bot, state: FSMContext):
             pass
 
 
-@router.message(Flow.searching, F.text)
+@router.message(Flow.searching, F.chat.type == ChatType.PRIVATE, F.text)
 async def text_search(message: Message, bot: Bot, state: FSMContext):
     await do_search(message, message.text.strip(), state, bot)
 
