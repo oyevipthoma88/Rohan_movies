@@ -63,6 +63,59 @@ async def _collection_or_none():
     return _collection
 
 
+async def _live_db():
+    """Return the Mongo database handle (or None) for live per-user collections."""
+    if await _collection_or_none() is None or _client is None:
+        return None
+    return _client[MONGO_DB]
+
+
+_indexes_ready = False
+
+
+async def _ensure_live_indexes(database) -> None:
+    global _indexes_ready
+    if _indexes_ready:
+        return
+    try:
+        await database["user_activity"].create_index([("user_id", 1), ("at", -1)])
+        await database["user_activity"].create_index([("event", 1), ("at", -1)])
+        await database["users"].create_index([("last_seen", -1)])
+        await database["users"].create_index([("username", 1)])
+    except Exception as exc:
+        logging.warning("Mongo index create failed: %s", exc)
+    _indexes_ready = True
+
+
+async def record_user_activity(profile: dict, activity: dict, is_new: bool = False) -> None:
+    """Live write: upsert the full user profile and append one activity row.
+
+    Every user who touches the bot (start, button, search, payment, join
+    request, block/unblock ...) lands in Mongo immediately — not only searchers.
+    """
+    try:
+        database = await _live_db()
+        if database is None:
+            return
+        await _ensure_live_indexes(database)
+        now = datetime.now(timezone.utc)
+        uid = profile["user_id"]
+        update = {
+            "$set": {**profile, "last_seen": now, "last_event": activity.get("event", "")},
+            "$setOnInsert": {"first_seen": now},
+            "$inc": {"actions": 1, f"events.{activity.get('event', 'other')}": 1},
+        }
+        await asyncio.wait_for(
+            database["users"].update_one({"_id": uid}, update, upsert=True), timeout=8.0
+        )
+        await asyncio.wait_for(
+            database["user_activity"].insert_one({**activity, "user_id": uid, "is_new": is_new, "at": now}),
+            timeout=8.0,
+        )
+    except Exception as exc:
+        logging.warning("Mongo activity write failed: %s: %s", type(exc).__name__, exc)
+
+
 async def restore_non_movie_state():
     """Restore from MongoDB."""
     try:
