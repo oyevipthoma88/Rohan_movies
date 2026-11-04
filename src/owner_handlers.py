@@ -474,126 +474,220 @@ async def set_online(message: Message, state: FSMContext):
 @router.callback_query(F.data == "op:broadcast")
 async def op_broadcast(cb: CallbackQuery, state: FSMContext):
     await _ask(cb, state, Own.broadcast,
-               "📢 Jo message broadcast karna hai wo bhejo (text/photo/video/document/album).\n\n"
-               "Message <b>forward format</b> me hi jayegi — original sender, channel, media sab "
-               "original ke saath users ko bhej di jayegi. Album/media-group bhi support hai.")
+               "📢 <b>Broadcast</b>\n\nJo message bhejna hai wo yahan bhejo ya <b>forward</b> karo "
+               "(text / photo / video / document / album / channel post).\n\n"
+               "Uske baad preview + options milenge:\n"
+               "↪️ <b>Forward</b> — original 'Forwarded from' tag ke saath\n"
+               "📋 <b>Copy</b> — bina forward tag ke (protected content ke liye best)\n\n"
+               "Shortcut: kisi message pe reply karke <code>/broadcast</code> bhi likh sakte ho.")
+
+
+# ---------- broadcast engine ----------
+_album_buffers: dict[str, list[int]] = {}
+_pending_bc: dict[int, dict] = {}
+_bc_running: dict[int, dict] = {}
+
+
+def _bc_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [button("↪️ Forward Send", callback_data="bc:go:forward"),
+         button("📋 Copy Send", callback_data="bc:go:copy")],
+        [button("🧪 Test to me", callback_data="bc:test"),
+         button("❌ Cancel", callback_data="bc:cancel")],
+    ])
+
+
+def _stop_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[button("⛔ Stop Broadcast", callback_data="bc:stop")]])
+
+
+async def _prepare_broadcast(bot: Bot, owner_id: int, chat_id: int, ids: list[int]) -> None:
+    ids = sorted(set(ids))
+    _pending_bc[owner_id] = {"chat_id": chat_id, "ids": ids}
+    users = await db.broadcast_user_ids()
+    await bot.send_message(
+        owner_id,
+        f"📢 <b>Broadcast ready</b>\n\n🧾 Messages: <b>{len(ids)}</b>{' (album)' if len(ids) > 1 else ''}\n"
+        f"👥 Active users: <b>{len(users)}</b>\n\nKaise bhejna hai?",
+        reply_markup=_bc_kb(),
+        reply_to_message_id=ids[0],
+    )
+
+
+@router.message(F.media_group_id.func(lambda g: g in _album_buffers))
+async def _album_part(message: Message):
+    _album_buffers[message.media_group_id].append(message.message_id)
 
 
 @router.message(Own.broadcast)
 async def do_broadcast(message: Message, bot: Bot, state: FSMContext):
     await state.clear()
-    users = await db.all_user_ids()
-    forward_ids = [message.message_id]
-    media_group_id = getattr(message, "media_group_id", None)
-    if media_group_id:
-        try:
-            history = await bot.get_chat_history(message.chat.id, limit=20)
-            forward_ids = [
-                m.message_id for m in history
-                if getattr(m, "media_group_id", None) == media_group_id
-            ]
-            forward_ids.sort()
-        except Exception:
-            forward_ids = [message.message_id]
-    note = await message.answer(
-        f"📢 Forwarding to {len(users)} users"
-        f" ({len(forward_ids)} message{'s' if len(forward_ids) > 1 else ''})..."
-    )
-    await log_owner_action(bot, message.from_user.id, "broadcast_start",
-                           f"To {len(users)} users, {len(forward_ids)} msgs")
-    use_copy = False
-    try:
-        test_fwd = await bot.forward_message(
-            chat_id=message.from_user.id,
-            from_chat_id=message.chat.id,
-            message_id=forward_ids[0],
-        )
-        try:
-            await bot.delete_message(message.from_user.id, test_fwd.message_id)
-        except Exception:
-            pass
-    except Exception as exc:
-        low = str(exc).lower()
-        if "forward" in low and ("restrict" in low or "protected" in low or "can't" in low):
-            use_copy = True
-            logging.info("Broadcast: source is forward-restricted, using copy_message")
-    limiter = asyncio.Semaphore(15)
-    permanent_errors = 0
-    protected_errors = 0
+    if not await is_owner(message.from_user.id):
+        return
+    gid = message.media_group_id
+    if gid:
+        _album_buffers[gid] = [message.message_id]
+        await asyncio.sleep(2.5)  # Telegram sends album items as separate updates
+        ids = _album_buffers.pop(gid, [message.message_id])
+    else:
+        ids = [message.message_id]
+    await _prepare_broadcast(bot, message.from_user.id, message.chat.id, ids)
 
-    async def deliver(uid: int) -> bool:
-        nonlocal permanent_errors, protected_errors
-        async with limiter:
-            for attempt in range(2):
-                last_exc = None
-                success = True
-                for mid in forward_ids:
-                    try:
-                        try:
-                            await bot.forward_message(
-                                chat_id=uid,
-                                from_chat_id=message.chat.id,
-                                message_id=mid,
-                            )
-                        except Exception as fwd_exc:
-                            low = str(fwd_exc).lower()
-                            if (
-                                "can't be forwarded" in low
-                                or "chat_forwards_restricted" in low
-                                or ("forward" in low and "restrict" in low)
-                            ):
-                                await bot.copy_message(
-                                    chat_id=uid,
-                                    from_chat_id=message.chat.id,
-                                    message_id=mid,
-                                )
-                                logging.warning(
-                                    "Broadcast: forward restricted for uid=%s mid=%s, copied instead. Error: %s",
-                                    uid, mid, fwd_exc,
-                                )
-                            else:
-                                raise
-                    except Exception as exc:
-                        low = str(exc).lower()
-                        if "can't be forwarded" in low or "chat_forwards_restricted" in low or ("forward" in low and "restrict" in low):
-                            try:
-                                await bot.copy_message(
-                                    chat_id=uid,
-                                    from_chat_id=message.chat.id,
-                                    message_id=mid,
-                                )
-                                continue
-                            except Exception:
-                                protected_errors += 1
-                                return False
-                        if "forbidden" in low or "blocked" in low or "user is deactivated" in low:
-                            permanent_errors += 1
-                            return False
-                        last_exc = exc
-                        success = False
-                        break
-                if success:
-                    return True
-                if attempt == 0 and last_exc is not None:
-                    low = str(last_exc).lower()
-                    if "retry after" in low:
-                        m = re.search(r"retry after (\d+)", low)
-                        await asyncio.sleep(int(m.group(1)) + 1 if m else 1)
+
+@router.message(Command("broadcast"))
+async def cmd_broadcast(message: Message, bot: Bot, state: FSMContext):
+    if not await is_owner(message.from_user.id):
+        return
+    if not message.reply_to_message:
+        await state.set_state(Own.broadcast)
+        await message.answer("📢 Broadcast message bhejo/forward karo, ya /cancel.", reply_markup=back_panel())
+        return
+    await _prepare_broadcast(bot, message.from_user.id, message.chat.id, [message.reply_to_message.message_id])
+
+
+@router.callback_query(F.data == "bc:cancel")
+async def bc_cancel(cb: CallbackQuery):
+    _pending_bc.pop(cb.from_user.id, None)
+    await cb.answer("Cancelled")
+    await cb.message.edit_text("❌ Broadcast cancel ho gaya.")
+
+
+@router.callback_query(F.data == "bc:stop")
+async def bc_stop(cb: CallbackQuery):
+    run = _bc_running.get(cb.from_user.id)
+    if run:
+        run["stop"] = True
+    await cb.answer("Stopping…")
+
+
+@router.callback_query(F.data == "bc:test")
+async def bc_test(cb: CallbackQuery, bot: Bot):
+    job = _pending_bc.get(cb.from_user.id)
+    if not job:
+        return await cb.answer("Broadcast expire ho gaya, dobara bhejo.", show_alert=True)
+    mode = await _send_one(bot, cb.from_user.id, job["chat_id"], job["ids"], "forward")
+    await cb.answer(f"Test: {mode}", show_alert=True)
+
+
+async def _send_one(bot: Bot, uid: int, from_chat: int, ids: list[int], mode: str) -> str:
+    """Deliver to one user. Returns 'forward' | 'copy' | 'blocked' | 'failed:<reason>'."""
+    from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
+    for attempt in range(4):
+        try:
+            if mode == "forward":
+                try:
+                    if len(ids) == 1:
+                        await bot.forward_message(uid, from_chat, ids[0])
                     else:
-                        await asyncio.sleep(1)
-                    continue
-                return False
-            return False
+                        await bot.forward_messages(uid, from_chat, ids)
+                    return "forward"
+                except TelegramBadRequest as exc:
+                    low = str(exc).lower()
+                    if "forward" not in low and "protected" not in low:
+                        raise
+                    # protected / restricted source -> copy fallback
+            if len(ids) == 1:
+                await bot.copy_message(uid, from_chat, ids[0])
+            else:
+                await bot.copy_messages(uid, from_chat, ids)
+            return "copy"
+        except TelegramRetryAfter as exc:
+            await asyncio.sleep(exc.retry_after + 1)
+        except TelegramForbiddenError:
+            return "blocked"
+        except TelegramBadRequest as exc:
+            low = str(exc).lower()
+            if "chat not found" in low or "user is deactivated" in low or "peer_id_invalid" in low:
+                return "blocked"
+            return f"failed:{exc}"
+        except Exception as exc:
+            if attempt == 3:
+                return f"failed:{type(exc).__name__}: {exc}"
+            await asyncio.sleep(1 + attempt)
+    return "failed:retry limit"
 
-    results = await asyncio.gather(*(deliver(uid) for uid in users))
-    sent = sum(results)
-    failed = len(results) - sent
-    method_label = "Copy" if use_copy else "Forward"
-    summary = f"✅ {method_label} broadcast done.\nDelivered: {sent}/{len(users)}\nFailed: {failed}"
-    if protected_errors:
-        summary += f"\n🔒 {protected_errors} user(s) ko forward nahi hua — source content protected hai."
-    await note.edit_text(summary)
-    await log_broadcast(bot, message.from_user.id, len(users), sent, failed)
+
+@router.callback_query(F.data.startswith("bc:go:"))
+async def bc_go(cb: CallbackQuery, bot: Bot):
+    owner = cb.from_user.id
+    if not await is_owner(owner):
+        return await cb.answer("Only owner", show_alert=True)
+    job = _pending_bc.pop(owner, None)
+    if not job:
+        return await cb.answer("Broadcast expire ho gaya, dobara bhejo.", show_alert=True)
+    if owner in _bc_running:
+        return await cb.answer("Ek broadcast already chal raha hai.", show_alert=True)
+    mode = cb.data.split(":")[2]
+    await cb.answer("Started 🚀")
+    users = await db.broadcast_user_ids()
+    run = {"stop": False}
+    _bc_running[owner] = run
+    stats = {"forward": 0, "copy": 0, "blocked": 0, "failed": 0, "done": 0}
+    errors: dict[str, int] = {}
+    started = time.time()
+    await log_owner_action(bot, owner, "broadcast_start", f"mode={mode} users={len(users)} msgs={len(job['ids'])}")
+    note = await cb.message.edit_text(f"🚀 Broadcast start… 0/{len(users)}", reply_markup=_stop_kb())
+    limiter = asyncio.Semaphore(20)
+
+    async def worker(uid: int):
+        async with limiter:
+            if run["stop"]:
+                return
+            res = await _send_one(bot, uid, job["chat_id"], job["ids"], mode)
+            if res.startswith("failed:"):
+                stats["failed"] += 1
+                reason = res[7:][:80]
+                errors[reason] = errors.get(reason, 0) + 1
+            else:
+                stats[res] += 1
+                if res == "blocked":
+                    try:
+                        await db.set_blocked(uid, True)
+                    except Exception:
+                        pass
+            stats["done"] += 1
+            await asyncio.sleep(0.04)
+
+    async def progress():
+        last = ""
+        while True:
+            await asyncio.sleep(4)
+            text = _bc_text(stats, len(users), started, running=True)
+            if text != last:
+                try:
+                    await note.edit_text(text, reply_markup=_stop_kb())
+                except Exception:
+                    pass
+                last = text
+
+    prog = asyncio.create_task(progress())
+    try:
+        await asyncio.gather(*(worker(u) for u in users))
+    finally:
+        prog.cancel()
+        _bc_running.pop(owner, None)
+    final = _bc_text(stats, len(users), started, running=False, stopped=run["stop"])
+    if errors:
+        final += "\n\n<b>Top errors:</b>\n" + "\n".join(
+            f"• <code>{k}</code> × {v}" for k, v in sorted(errors.items(), key=lambda x: -x[1])[:5])
+    try:
+        await note.edit_text(final)
+    except Exception:
+        await bot.send_message(owner, final)
+    await log_broadcast(bot, owner, len(users), stats["forward"] + stats["copy"], stats["blocked"] + stats["failed"])
+
+
+def _bc_text(st: dict, total: int, started: float, running: bool, stopped: bool = False) -> str:
+    sent = st["forward"] + st["copy"]
+    pct = int(st["done"] * 100 / total) if total else 100
+    bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+    head = "🚀 <b>Broadcast running…</b>" if running else ("⛔ <b>Broadcast stopped</b>" if stopped else "✅ <b>Broadcast complete</b>")
+    return (f"{head}\n\n<code>{bar}</code> {pct}%\n"
+            f"📬 Progress: <b>{st['done']}/{total}</b>\n"
+            f"✅ Delivered: <b>{sent}</b> (↪️ {st['forward']} forward, 📋 {st['copy']} copy)\n"
+            f"🚫 Blocked/Deleted: <b>{st['blocked']}</b>\n"
+            f"⚠️ Failed: <b>{st['failed']}</b>\n"
+            f"⏱ Time: {int(time.time() - started)}s")
 
 
 @router.callback_query(F.data == "op:setchannel")
