@@ -93,6 +93,20 @@ CREATE TABLE IF NOT EXISTS delivery_expiry (
     delete_at INTEGER NOT NULL,
     PRIMARY KEY (chat_id, message_id)
 );
+CREATE TABLE IF NOT EXISTS groups (
+    chat_id INTEGER PRIMARY KEY,
+    title TEXT,
+    active INTEGER DEFAULT 1,
+    last_seen INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS group_members (
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    name TEXT,
+    username TEXT,
+    last_seen INTEGER DEFAULT 0,
+    PRIMARY KEY (chat_id, user_id)
+);
 CREATE INDEX IF NOT EXISTS idx_history_msg_id_at ON history (msg_id, at DESC);
 CREATE INDEX IF NOT EXISTS idx_delivery_expiry_delete_at ON delivery_expiry (delete_at);
 """
@@ -226,7 +240,7 @@ class DB:
             await conn.close()
 
     async def export_state(self) -> dict:
-        tables = ("users", "movies", "history", "plans", "coupons", "coupon_uses", "admins", "settings", "stats", "payments", "audit_logs", "delivery_expiry")
+        tables = ("users", "movies", "history", "plans", "coupons", "coupon_uses", "admins", "settings", "stats", "payments", "audit_logs", "delivery_expiry", "groups", "group_members")
         state = {"version": 1, "tables": {}}
         for table in tables:
             cur = await self.conn.execute(f"SELECT * FROM {table}")
@@ -236,7 +250,7 @@ class DB:
     async def export_tables(self, table_names: tuple[str, ...]) -> dict:
         state = {"version": 1, "tables": {}}
         for table in table_names:
-            if table not in {"users", "movies", "history", "plans", "coupons", "coupon_uses", "admins", "settings", "stats", "payments", "audit_logs", "delivery_expiry"}:
+            if table not in {"users", "movies", "history", "plans", "coupons", "coupon_uses", "admins", "settings", "stats", "payments", "audit_logs", "delivery_expiry", "groups", "group_members"}:
                 continue
             cur = await self.conn.execute(f"SELECT * FROM {table}")
             state["tables"][table] = [dict(row) for row in await cur.fetchall()]
@@ -292,7 +306,7 @@ class DB:
         try:
             await self.conn.execute("BEGIN")
             for table, rows in tables.items():
-                if table not in {"users", "movies", "history", "plans", "coupons", "coupon_uses", "admins", "settings", "stats", "payments", "audit_logs", "delivery_expiry"}:
+                if table not in {"users", "movies", "history", "plans", "coupons", "coupon_uses", "admins", "settings", "stats", "payments", "audit_logs", "delivery_expiry", "groups", "group_members"}:
                     continue
                 cur = await self.conn.execute(f"PRAGMA table_info({table})")
                 columns = {row["name"] for row in await cur.fetchall()}
@@ -365,6 +379,35 @@ class DB:
             )
         await self.conn.commit()
         return not exists
+
+    async def remember_group_member(self, chat_id: int, title: str, user_id: int, name: str, username: str) -> None:
+        now = int(time.time())
+        await self.conn.execute(
+            "INSERT INTO groups (chat_id,title,active,last_seen) VALUES (?,?,1,?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title, active=1, last_seen=excluded.last_seen",
+            (chat_id, title, now))
+        await self.conn.execute(
+            "INSERT INTO group_members (chat_id,user_id,name,username,last_seen) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(chat_id,user_id) DO UPDATE SET name=excluded.name, username=excluded.username, "
+            "last_seen=excluded.last_seen",
+            (chat_id, user_id, name, username, now))
+        await self.conn.commit()
+
+    async def recent_group_members(self, chat_id: int, since: int) -> list:
+        cur = await self.conn.execute(
+            "SELECT * FROM group_members WHERE chat_id=? AND last_seen>=? ORDER BY last_seen DESC LIMIT 200",
+            (chat_id, since))
+        return await cur.fetchall()
+
+    async def active_group_ids(self) -> list[int]:
+        cur = await self.conn.execute("SELECT chat_id FROM groups WHERE active=1")
+        return [r["chat_id"] for r in await cur.fetchall()]
+
+    async def set_group_active(self, chat_id: int, active: bool) -> None:
+        await self.conn.execute(
+            "INSERT INTO groups (chat_id,title,active,last_seen) VALUES (?,'',?,?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET active=excluded.active", (chat_id, int(active), int(time.time())))
+        await self.conn.commit()
 
     async def set_blocked(self, user_id: int, blocked: bool) -> None:
         await self.conn.execute("UPDATE users SET blocked_bot=? WHERE user_id=?", (int(blocked), user_id))
