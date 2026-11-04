@@ -173,6 +173,8 @@ class ActivityMiddleware(BaseMiddleware):
         user, act = info
         if getattr(user, "is_bot", False) or (LOG_CHANNEL and act.get("chat_id") == LOG_CHANNEL):
             return
+        if act.get("chat_type") in ("group", "supergroup") and act["event"] != "command" and act["event"] != "button":
+            return  # normal group chatter: not logged (bot ignores it anyway)
         try:
             # Runs AFTER the handler so /start referral + is_new logic stays intact.
             is_new = await db.track_user(user.id, user.username or "", user.full_name or "",
