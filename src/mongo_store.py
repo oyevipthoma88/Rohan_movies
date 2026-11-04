@@ -12,7 +12,7 @@ from db import db
 
 PERSISTED_TABLES = (
     "users", "history", "plans", "coupons", "coupon_uses", "admins",
-    "settings", "stats", "payments", "audit_logs",
+    "settings", "stats", "payments", "audit_logs", "groups", "group_members",
 )
 NON_MOVIE_TABLES = PERSISTED_TABLES
 # Movie catalog is also persisted so the bot survives restarts without a full rescan.
