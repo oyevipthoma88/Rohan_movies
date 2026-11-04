@@ -201,6 +201,8 @@ async def main() -> None:
         "Naya scan sirf owner ke /scanall ya custom range command se chalega."
     )
     dp = Dispatcher(storage=MemoryStorage())
+    from activity_tracker import ActivityMiddleware
+    dp.update.outer_middleware(ActivityMiddleware())
     dp.include_router(indexer.router)
     dp.include_router(owner_handlers.router)
     dp.include_router(user_handlers.router)
@@ -218,7 +220,10 @@ async def main() -> None:
             logging.warning("No helper bots! Set HELPER_BOT_TOKENS in .env")
         scan_task = asyncio.create_task(auto_scan_main_channel(bot))
         logging.info('Auto-scan task scheduled')
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, allowed_updates=[
+            "message", "edited_message", "callback_query", "channel_post", "inline_query",
+            "my_chat_member", "chat_join_request", "pre_checkout_query",
+        ])
     finally:
         # Heroku SIGKILLs 30s after SIGTERM (Error R12). Cancel every long
         # running task first, then do one small save.
