@@ -1537,3 +1537,31 @@ async def op_groupmode_set(cb: CallbackQuery):
            else "Ab bot groups me koi search ka jawab nahi dega. Sirf DM me search chalegi."),
         reply_markup=owner_panel_kb()
     )
+
+
+@router.message(Command("grouptips"))
+async def cmd_grouptips(message: Message, bot: Bot):
+    """/grouptips on | off | now | status — hourly random-tag tip in groups."""
+    if not await is_owner(message.from_user.id):
+        return
+    arg = (message.text or "").partition(" ")[2].strip().lower()
+    from group_guard import send_group_tip
+    if arg in {"on", "off"}:
+        await db.set("group_tips", "1" if arg == "on" else "0")
+        return await message.answer(f"✅ Hourly group tips: <b>{arg.upper()}</b>")
+    if arg == "now":
+        if message.chat.type in {"group", "supergroup"}:
+            ok = await send_group_tip(bot, message.chat.id)
+            return await message.answer("✅ Tip bhej diya" if ok else "⚠️ Abhi koi active user record nahi hua")
+        sent = 0
+        for gid in await db.active_group_ids():
+            try:
+                sent += bool(await send_group_tip(bot, gid))
+            except Exception:
+                pass
+        return await message.answer(f"✅ {sent} group(s) me tip bheja")
+    groups = await db.active_group_ids()
+    status = "ON" if await db.get("group_tips", "1") == "1" else "OFF"
+    await message.answer(
+        f"👥 <b>Group Tips</b>\n\nStatus: <b>{status}</b>\nActive groups: <b>{len(groups)}</b>\n\n"
+        "<code>/grouptips on</code> · <code>/grouptips off</code> · <code>/grouptips now</code>")
