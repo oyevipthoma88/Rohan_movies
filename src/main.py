@@ -203,6 +203,8 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
     from activity_tracker import ActivityMiddleware
     dp.update.outer_middleware(ActivityMiddleware())
+    from group_guard import GroupGuardMiddleware, group_tip_loop
+    dp.message.outer_middleware(GroupGuardMiddleware())
     dp.include_router(indexer.router)
     dp.include_router(owner_handlers.router)
     dp.include_router(user_handlers.router)
@@ -219,6 +221,7 @@ async def main() -> None:
         else:
             logging.warning("No helper bots! Set HELPER_BOT_TOKENS in .env")
         scan_task = asyncio.create_task(auto_scan_main_channel(bot))
+        tip_task = asyncio.create_task(group_tip_loop(bot), name="group-tips")  # noqa: F841
         logging.info('Auto-scan task scheduled')
         await dp.start_polling(bot, allowed_updates=[
             "message", "edited_message", "callback_query", "channel_post", "inline_query",
