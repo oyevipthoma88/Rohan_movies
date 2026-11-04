@@ -6,6 +6,7 @@ LOG_CHANNEL is not configured.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 import logging
 from html import escape
@@ -46,10 +47,47 @@ async def log_event(bot: Bot, hashtag: str, title: str, fields: list[tuple[str, 
     lines.append(_DIVIDER)
     lines.append(f"⏰ <b>Time:</b> {_ts()}")
     text = "\n".join(lines)
+    await enqueue_log(bot, text)
+
+
+# ---------- rate-limited log queue ----------
+# Every interaction is logged now, so sending directly would hit Telegram flood
+# limits and drop logs. A single worker sends ~1 msg/sec per channel and
+# honours RetryAfter, so no log is lost under load.
+_log_queue: "asyncio.Queue[tuple[Bot, str]] | None" = None
+_log_worker: "asyncio.Task | None" = None
+
+
+async def _log_worker_loop() -> None:
+    from aiogram.exceptions import TelegramRetryAfter
+    assert _log_queue is not None
+    while True:
+        bot, text = await _log_queue.get()
+        for _ in range(3):
+            try:
+                await bot.send_message(LOG_CHANNEL, text[:4096], disable_web_page_preview=True,
+                                       disable_notification=True)
+                break
+            except TelegramRetryAfter as exc:
+                await asyncio.sleep(exc.retry_after + 1)
+            except Exception as exc:
+                logger.warning("LOG_CHANNEL send failed: %s", exc)
+                break
+        await asyncio.sleep(1.05)
+
+
+async def enqueue_log(bot: Bot, text: str) -> None:
+    global _log_queue, _log_worker
+    if not LOG_CHANNEL:
+        return
+    if _log_queue is None:
+        _log_queue = asyncio.Queue(maxsize=5000)
+    if _log_worker is None or _log_worker.done():
+        _log_worker = asyncio.create_task(_log_worker_loop(), name="log-channel-worker")
     try:
-        await bot.send_message(LOG_CHANNEL, text)
-    except Exception as exc:
-        logger.warning("LOG_CHANNEL send failed for %s: %s", hashtag, exc)
+        _log_queue.put_nowait((bot, text))
+    except asyncio.QueueFull:
+        logger.warning("Log queue full, dropping log line")
 
 
 async def log_start(bot: Bot, user, is_new: bool, ref: int, total_users: int = 0) -> None:
